@@ -188,8 +188,13 @@ export default function Dashboard() {
   const [faucetStatus, setFaucetStatus] = useState(
     "Connect Phantom, then fund the connected devnet wallet with AgentSpend test tokens."
   );
+  const [agentFaucetStatus, setAgentFaucetStatus] = useState(
+    "Select a hosted agent, then mint AgentSpend test tokens to its wallet."
+  );
   const [faucetTokenAccount, setFaucetTokenAccount] = useState<string | null>(null);
   const [faucetSignature, setFaucetSignature] = useState<string | null>(null);
+  const [agentFaucetTokenAccount, setAgentFaucetTokenAccount] = useState<string | null>(null);
+  const [agentFaucetSignature, setAgentFaucetSignature] = useState<string | null>(null);
   const [agentCommand, setAgentCommand] = useState("");
   const [agentApiKey, setAgentApiKey] = useState("");
   const [agentMessages, setAgentMessages] = useState<AgentChatMessage[]>([
@@ -211,6 +216,10 @@ export default function Dashboard() {
   const [telegramLinkCode, setTelegramLinkCode] = useState<string | null>(null);
 
   const simulatorFindings = useMemo(() => simulatePolicyAttacks(policy), [policy]);
+  const selectedProvisionedAgent = useMemo(
+    () => provisionedAgents.find((agent) => agent.id === selectedProvisionedAgentId) ?? null,
+    [provisionedAgents, selectedProvisionedAgentId]
+  );
   const activeDerivedPolicyPda = useMemo(
     () =>
       deriveRegistryPolicyPda(
@@ -913,6 +922,46 @@ export default function Dashboard() {
     }
   }
 
+  async function requestSelectedAgentTokens() {
+    if (!selectedProvisionedAgent) {
+      setAgentFaucetStatus("Select a hosted agent before minting AgentSpend test tokens.");
+      return;
+    }
+
+    try {
+      setAgentFaucetTokenAccount(null);
+      setAgentFaucetSignature(null);
+      setAgentFaucetStatus(`Minting AgentSpend test tokens to ${shortAddress(selectedProvisionedAgent.publicKey)}...`);
+
+      const result = await fetch("/api/devnet/faucet", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner: selectedProvisionedAgent.publicKey,
+          tokenMint: selectedProvisionedAgent.tokenMint,
+          amount: 25,
+          decimals: selectedProvisionedAgent.decimals
+        })
+      });
+      const payload = (await result.json()) as {
+        ok?: boolean;
+        error?: string;
+        tokenAccount?: string;
+        signature?: string;
+      };
+
+      if (!result.ok || !payload.ok) {
+        throw new Error(payload.error ?? "Agent token mint request failed.");
+      }
+
+      setAgentFaucetTokenAccount(payload.tokenAccount ?? null);
+      setAgentFaucetSignature(payload.signature ?? null);
+      setAgentFaucetStatus("Selected hosted agent funded with AgentSpend test tokens.");
+    } catch (error) {
+      setAgentFaucetStatus(getErrorMessage(error));
+    }
+  }
+
   async function submitAgentCommand() {
     const command = agentCommand.trim();
 
@@ -1025,7 +1074,10 @@ export default function Dashboard() {
     setRecipientTokenAccount(null);
     setFaucetTokenAccount(null);
     setFaucetSignature(null);
+    setAgentFaucetTokenAccount(null);
+    setAgentFaucetSignature(null);
     setFaucetStatus("Connect Phantom, then fund the connected devnet wallet with AgentSpend test tokens.");
+    setAgentFaucetStatus("Select a hosted agent, then mint AgentSpend test tokens to its wallet.");
     setAgentCommand("");
     setAgentApiKey("");
     setAgentMessages([
@@ -1117,6 +1169,9 @@ export default function Dashboard() {
             executePolicyPayment={executePolicyPayment}
             executeSignature={executeSignature}
             executeStatus={executeStatus}
+            agentFaucetSignature={agentFaucetSignature}
+            agentFaucetStatus={agentFaucetStatus}
+            agentFaucetTokenAccount={agentFaucetTokenAccount}
             faucetSignature={faucetSignature}
             faucetStatus={faucetStatus}
             faucetTokenAccount={faucetTokenAccount}
@@ -1137,6 +1192,7 @@ export default function Dashboard() {
             recipientCatalog={recipientCatalog}
             recipientTokenAccount={recipientTokenAccount}
             requestDevnetTokens={requestDevnetTokens}
+            requestSelectedAgentTokens={requestSelectedAgentTokens}
             addAgentToRegistry={addAgentToRegistry}
             removeRegisteredAgent={removeRegisteredAgent}
             clearRegisteredAgentSelection={clearRegisteredAgentSelection}
@@ -1154,6 +1210,7 @@ export default function Dashboard() {
             togglePause={togglePause}
             useRegisteredAgent={useRegisteredAgent}
             walletAddress={walletAddress}
+            selectedProvisionedAgent={selectedProvisionedAgent}
             ownerAuthStatus={ownerAuthStatus}
             provisionedAgents={provisionedAgents}
             selectedProvisionedAgentId={selectedProvisionedAgentId}
@@ -1190,6 +1247,9 @@ function OperationsView({
   executePolicyPayment,
   executeSignature,
   executeStatus,
+  agentFaucetSignature,
+  agentFaucetStatus,
+  agentFaucetTokenAccount,
   faucetSignature,
   faucetStatus,
   faucetTokenAccount,
@@ -1210,6 +1270,7 @@ function OperationsView({
   recipientCatalog,
   recipientTokenAccount,
   requestDevnetTokens,
+  requestSelectedAgentTokens,
   addAgentToRegistry,
   removeRegisteredAgent,
   clearRegisteredAgentSelection,
@@ -1227,6 +1288,7 @@ function OperationsView({
   togglePause,
   useRegisteredAgent,
   walletAddress,
+  selectedProvisionedAgent,
   ownerAuthStatus,
   provisionedAgents,
   selectedProvisionedAgentId,
@@ -1252,6 +1314,9 @@ function OperationsView({
   executePolicyPayment: () => void;
   executeSignature: string | null;
   executeStatus: string;
+  agentFaucetSignature: string | null;
+  agentFaucetStatus: string;
+  agentFaucetTokenAccount: string | null;
   faucetSignature: string | null;
   faucetStatus: string;
   faucetTokenAccount: string | null;
@@ -1272,6 +1337,7 @@ function OperationsView({
   recipientCatalog: CatalogItem[];
   recipientTokenAccount: string | null;
   requestDevnetTokens: () => void;
+  requestSelectedAgentTokens: () => void;
   addAgentToRegistry: () => void;
   removeRegisteredAgent: (agentId: string) => void;
   clearRegisteredAgentSelection: () => void;
@@ -1289,6 +1355,7 @@ function OperationsView({
   togglePause: () => void;
   useRegisteredAgent: (agent: AgentRegistryEntry) => void;
   walletAddress: string | null;
+  selectedProvisionedAgent: ProvisionedAgent | null;
   ownerAuthStatus: string;
   provisionedAgents: ProvisionedAgent[];
   selectedProvisionedAgentId: string | null;
@@ -1355,6 +1422,68 @@ function OperationsView({
                 <Activity size={16} color="var(--cyan)" />
               </header>
               <p>Approved and rejected actions are visible in the app, with devnet transaction links for successful payments.</p>
+            </div>
+          </div>
+          <div className="setup-grid" style={{ marginTop: 14 }}>
+            <div className="event">
+              <header>
+                <strong>Fund selected hosted agent</strong>
+                <FlaskConical size={16} color="var(--cyan)" />
+              </header>
+              <p>
+                The agent needs devnet SOL for fees and AgentSpend test tokens for payments.
+                Get SOL manually, then mint test tokens here.
+              </p>
+              <p>
+                Agent wallet{" "}
+                <strong>{selectedProvisionedAgent ? selectedProvisionedAgent.publicKey : "select an agent"}</strong>
+              </p>
+              <div className="link-row">
+                <a
+                  className="explorer-link"
+                  href="https://faucet.solana.com"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink size={15} /> Get devnet SOL
+                </a>
+                {selectedProvisionedAgent ? (
+                  <a
+                    className="explorer-link"
+                    href={getExplorerAddressUrl(selectedProvisionedAgent.publicKey)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <ExternalLink size={15} /> View agent wallet
+                  </a>
+                ) : null}
+              </div>
+              <p>{agentFaucetStatus}</p>
+              {agentFaucetTokenAccount ? (
+                <p>
+                  Token account <strong>{agentFaucetTokenAccount}</strong>
+                </p>
+              ) : null}
+              {agentFaucetSignature ? (
+                <a
+                  className="explorer-link"
+                  href={getExplorerTransactionUrl(agentFaucetSignature)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink size={15} /> View agent faucet transaction
+                </a>
+              ) : null}
+              <div className="button-row" style={{ marginTop: 12 }}>
+                <button
+                  className="button"
+                  type="button"
+                  onClick={requestSelectedAgentTokens}
+                  disabled={!selectedProvisionedAgent}
+                >
+                  <FlaskConical size={17} /> Mint tokens to selected agent
+                </button>
+              </div>
             </div>
           </div>
         </section>
