@@ -1,0 +1,29 @@
+{
+  "name": "@agentspend/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "test": "vitest run --pool=threads",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentspend/policy-simulator": "file:../../packages/policy-simulator",
+    "@agentspend/shared": "file:../../packages/shared",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "@upstash/redis": "^1.38.0",
+    "lucide-react": "^0.511.0",
+    "next": "^15.3.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.4",
+    "@types/react-dom": "^19.1.5",
+    "typescript": "^5.8.3"
+  }
+}
