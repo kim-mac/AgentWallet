@@ -1,0 +1,15 @@
+<svg width="2400" height="720" viewBox="0 0 2400 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="2400" height="720" rx="72" fill="#1A1C1E"/>
+  <g transform="translate(112 140)">
+    <rect width="440" height="440" rx="96" fill="#222426"/>
+    <rect x="18" y="18" width="404" height="404" rx="78" stroke="#B8C4CC" stroke-opacity="0.16" stroke-width="3"/>
+    <circle cx="220" cy="220" r="65" fill="#B8C4CC" fill-opacity="0.92"/>
+    <circle cx="220" cy="220" r="143" stroke="#B8C4CC" stroke-opacity="0.32" stroke-width="16"/>
+    <path d="M220 48V122" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="22" stroke-linecap="round"/>
+    <path d="M220 318V392" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="22" stroke-linecap="round"/>
+    <path d="M48 220H122" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="22" stroke-linecap="round"/>
+    <path d="M318 220H392" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="22" stroke-linecap="round"/>
+  </g>
+  <text x="640" y="330" fill="#E4E6E9" font-family="Inter, Arial, sans-serif" font-size="150" font-weight="600" letter-spacing="-4">AgentWallet</text>
+  <text x="646" y="430" fill="#8B9099" font-family="JetBrains Mono, Consolas, monospace" font-size="44" letter-spacing="4">wallets for AI agents · policy-enforced</text>
+</svg>

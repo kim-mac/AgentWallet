@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { buildAgentWalletStatus } from "../../../../lib/agent-wallet-status";
 import { getAgentByApiKey, toPublicAgent } from "../../../../lib/agent-provisioning";
 import { authorizeAgentRequest } from "../../../../lib/agent-request-auth";
 
@@ -12,5 +13,8 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Invalid agent API key." }, { status: 401 });
   }
 
-  return NextResponse.json({ agent: toPublicAgent(agent) });
+  return NextResponse.json({
+    agent: toPublicAgent(agent),
+    status: buildAgentWalletStatus(agent)
+  });
 }

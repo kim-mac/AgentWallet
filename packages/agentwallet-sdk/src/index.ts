@@ -26,6 +26,34 @@ export type AgentWalletPaymentResult = {
   recipientTokenAccount: string;
 };
 
+export type AgentWalletAgent = {
+  id: string;
+  owner: string;
+  name: string;
+  publicKey: string;
+  apiKeyPrefix: string;
+  programId: string;
+  policyPda: string | null;
+  tokenMint: string;
+  decimals: number;
+  telegramChatId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentWalletStatus = {
+  readyForPayments: boolean;
+  policyConfigured: boolean;
+  tokenMintConfigured: boolean;
+  telegramLinked: boolean;
+  missing: Array<"policyPda" | "tokenMint">;
+};
+
+export type AgentWalletMe = {
+  agent: AgentWalletAgent;
+  status: AgentWalletStatus;
+};
+
 export type X402PaymentRequired = {
   x402Version: string;
   accepts: Array<{
@@ -63,11 +91,11 @@ export class AgentWallet {
     return parseJsonResponse<AgentWalletPaymentResult>(response);
   }
 
-  async getAgent() {
+  async getAgent(): Promise<AgentWalletMe> {
     const response = await this.fetcher(`${this.baseUrl}/api/agent-wallet/me`, {
       headers: { authorization: `Bearer ${this.apiKey}` }
     });
-    return parseJsonResponse(response);
+    return parseJsonResponse<AgentWalletMe>(response);
   }
 
   async getAudit() {

@@ -35,6 +35,44 @@ describe("AgentWallet SDK", () => {
     );
   });
 
+  it("loads the hosted agent wallet readiness state", async () => {
+    const fetcher = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          agent: {
+            name: "Research agent",
+            publicKey: "FoJQ6uazwDmo2knNhKBM8ZYAcvC8Y5yQtSEVjd3iy6dN"
+          },
+          status: {
+            readyForPayments: true,
+            policyConfigured: true,
+            tokenMintConfigured: true,
+            telegramLinked: false,
+            missing: []
+          }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    const wallet = new AgentWallet({
+      apiKey: "agent_key",
+      baseUrl: "https://agentwallet.example/",
+      fetch: fetcher
+    });
+
+    await expect(wallet.getAgent()).resolves.toMatchObject({
+      status: { readyForPayments: true },
+      agent: { name: "Research agent" }
+    });
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "https://agentwallet.example/api/agent-wallet/me",
+      expect.objectContaining({
+        headers: expect.objectContaining({ authorization: "Bearer agent_key" })
+      })
+    );
+  });
+
   it("completes an x402 retry after a 402 payment challenge", async () => {
     const paymentRequired = btoa(
       JSON.stringify({

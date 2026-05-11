@@ -6,6 +6,7 @@ import {
   Bot,
   CheckCircle2,
   CircleDollarSign,
+  Copy,
   ExternalLink,
   FlaskConical,
   Gauge,
@@ -44,7 +45,8 @@ import {
   getExplorerAddressUrl,
   getExplorerTransactionUrl,
   getPhantomProvider,
-  parsePublicKey
+  parsePublicKey,
+  type PhantomProvider
 } from "../lib/solana-devnet";
 
 const storageKey = "agentwallet.dashboard-state.v2";
@@ -189,7 +191,7 @@ export default function Dashboard() {
     }
   ]);
   const [isAgentExecuting, setIsAgentExecuting] = useState(false);
-  const [ownerAuthStatus, setOwnerAuthStatus] = useState("Connect wallet and sign once to provision hosted agents.");
+  const [ownerAuthStatus, setOwnerAuthStatus] = useState("Connect wallet once to provision hosted agents.");
   const [provisionedAgents, setProvisionedAgents] = useState<ProvisionedAgent[]>([]);
   const [selectedProvisionedAgentId, setSelectedProvisionedAgentId] = useState<string | null>(null);
   const [newAgentName, setNewAgentName] = useState("");
@@ -357,6 +359,40 @@ export default function Dashboard() {
     };
   }, [activeDerivedPolicyPda, onchainPolicyForm.agent]);
 
+  useEffect(() => {
+    if (!telegramLinkCode || !selectedProvisionedAgentId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function refreshTelegramLinkState() {
+      try {
+        const agents = await loadProvisionedAgents();
+        const selectedAgent = agents.find((agent) => agent.id === selectedProvisionedAgentId);
+
+        if (cancelled || !selectedAgent?.telegramChatId) {
+          return;
+        }
+
+        setTelegramLinkCode(null);
+        setTelegramLinkStatus(`Telegram linked to ${selectedAgent.name}.`);
+      } catch {
+        if (!cancelled) {
+          setTelegramLinkStatus("Waiting for Telegram link confirmation...");
+        }
+      }
+    }
+
+    void refreshTelegramLinkState();
+    const interval = window.setInterval(refreshTelegramLinkState, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [selectedProvisionedAgentId, telegramLinkCode]);
+
   async function connectWallet() {
     const provider = getPhantomProvider();
 
@@ -369,9 +405,11 @@ export default function Dashboard() {
       const response = await provider.connect();
       const address = response.publicKey.toBase58();
       setWalletAddress(address);
-      setAnchorStatus("Wallet connected on devnet.");
+      setAnchorStatus("Wallet connected on devnet. Requesting owner session signature...");
+      await signInOwnerWalletWithProvider(provider, address);
     } catch (error) {
       setAnchorStatus(getErrorMessage(error));
+      setOwnerAuthStatus(getErrorMessage(error));
     }
   }
 
@@ -383,47 +421,78 @@ export default function Dashboard() {
       return;
     }
 
-    if (!provider.signMessage) {
-      setOwnerAuthStatus("This wallet does not support message signing. Use Phantom or another Solana wallet with signMessage.");
-      return;
-    }
-
     try {
-      const response = provider.publicKey ? { publicKey: provider.publicKey } : await provider.connect();
-      const owner = response.publicKey.toBase58();
-      setWalletAddress(owner);
-      setOwnerAuthStatus("Requesting owner sign-in challenge...");
-
-      const challengeResponse = await fetch("/api/auth/wallet/challenge", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ owner })
-      });
-      const challenge = await readJsonResponse<{ message: string }>(challengeResponse);
-      const encodedMessage = new TextEncoder().encode(challenge.message);
-      const signed = await provider.signMessage(encodedMessage, "utf8");
-
-      const verifyResponse = await fetch("/api/auth/wallet/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          owner,
-          message: challenge.message,
-          signature: Array.from(signed.signature)
-        })
-      });
-      await readJsonResponse(verifyResponse);
-      setOwnerAuthStatus("Owner wallet signed in. You can create hosted agent keys now.");
-      await loadProvisionedAgents();
+      await signInOwnerWalletWithProvider(provider);
     } catch (error) {
       setOwnerAuthStatus(getErrorMessage(error));
     }
   }
 
+  async function signInOwnerWalletWithProvider(
+    provider: PhantomProvider,
+    connectedOwner?: string
+  ) {
+    if (!provider.signMessage) {
+      setOwnerAuthStatus("This wallet does not support message signing. Use Phantom or another Solana wallet with signMessage.");
+      return;
+    }
+
+    const response = connectedOwner
+      ? null
+      : provider.publicKey
+        ? { publicKey: provider.publicKey }
+        : await provider.connect();
+    const owner = connectedOwner ?? response!.publicKey.toBase58();
+    setWalletAddress(owner);
+    setOwnerAuthStatus("Requesting owner sign-in challenge...");
+
+    const challengeResponse = await fetch("/api/auth/wallet/challenge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ owner })
+    });
+    const challenge = await readJsonResponse<{ message: string }>(challengeResponse);
+    const encodedMessage = new TextEncoder().encode(challenge.message);
+    const signed = await provider.signMessage(encodedMessage, "utf8");
+
+    const verifyResponse = await fetch("/api/auth/wallet/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        owner,
+        message: challenge.message,
+        signature: Array.from(signed.signature)
+      })
+    });
+    await readJsonResponse(verifyResponse);
+    setOwnerAuthStatus("Owner wallet signed in. Loading hosted agents...");
+    const agents = await loadProvisionedAgentsWithRetry();
+    setAnchorStatus("Wallet connected and signed in on devnet.");
+    setOwnerAuthStatus(
+      agents.length
+        ? `Owner wallet signed in. Loaded ${agents.length} hosted agent${agents.length === 1 ? "" : "s"}.`
+        : "Owner wallet signed in. No hosted agents found for this wallet yet."
+    );
+  }
+
   async function loadProvisionedAgents() {
-    const response = await fetch("/api/agents", { cache: "no-store" });
+    const response = await fetch("/api/agents", { cache: "no-store", credentials: "same-origin" });
     const payload = await readJsonResponse<{ agents: ProvisionedAgent[] }>(response);
     setProvisionedAgents(payload.agents);
+    return payload.agents;
+  }
+
+  async function loadProvisionedAgentsWithRetry() {
+    try {
+      return await loadProvisionedAgents();
+    } catch (error) {
+      await delay(250);
+      try {
+        return await loadProvisionedAgents();
+      } catch {
+        throw error;
+      }
+    }
   }
 
   async function loadAgentWalletAudit(apiKey = agentApiKey.trim()) {
@@ -501,7 +570,7 @@ export default function Dashboard() {
       const response = await fetch(`/api/agents/${agentId}/telegram-link`, { method: "POST" });
       const payload = await readJsonResponse<{ code: string; expiresAt: string }>(response);
       setTelegramLinkCode(payload.code);
-      setTelegramLinkStatus(`Send /link ${payload.code} to the shared Telegram bot. This code expires at ${new Date(payload.expiresAt).toLocaleTimeString()}.`);
+      setTelegramLinkStatus(`Send /link ${payload.code} to the shared Telegram bot (Open @agentspendbot). This code expires at ${new Date(payload.expiresAt).toLocaleTimeString()}.`);
     } catch (error) {
       setTelegramLinkStatus(getErrorMessage(error));
     }
@@ -776,6 +845,11 @@ export default function Dashboard() {
       setAnchorSignature(signature);
       setPolicyAccountStatus("initialized");
       setAnchorStatus(`Anchor policy account ${action} confirmed on devnet.`);
+      if (action === "pause" || action === "resume") {
+        const nextStatus = action === "pause" ? "paused" : "active";
+        setPolicy((current) => ({ ...current, status: nextStatus }));
+        setDraftPolicyStatus(`Policy ${nextStatus} on-chain.`);
+      }
       setAgentRegistry((current) =>
         current.map((agent) =>
           agent.wallet === args.agent.toBase58()
@@ -1516,66 +1590,63 @@ function OperationsView({
               <p>{displayedPolicyPda ? policyStatusText : "Register and publish a policy before the agent can spend."}</p>
             </div>
           </div>
-          <div className="setup-grid" style={{ marginTop: 14 }}>
-            <div className="event">
+          <div className="funding-strip">
+            <div className="funding-strip-main">
               <header>
                 <strong>Fund selected hosted agent</strong>
                 <FlaskConical size={16} color="var(--cyan)" />
               </header>
               <p>
-                The agent needs devnet SOL for fees and AgentWallet test tokens for payments.
-                Get SOL manually, then mint test tokens here.
+                Fund with devnet SOL first, then mint AgentWallet test tokens for payments.
               </p>
-              <p>
-                Agent wallet{" "}
-                <strong>{selectedProvisionedAgent ? selectedProvisionedAgent.publicKey : "select an agent"}</strong>
+              <p className="inline-status warning compact-status">
+                <AlertTriangle size={15} /> SOL is required before token minting.
               </p>
-              <div className="link-row">
+            </div>
+            <div className="funding-strip-meta">
+              <span className="eyebrow">Agent wallet</span>
+              <strong>{selectedProvisionedAgent ? shortAddress(selectedProvisionedAgent.publicKey) : "select an agent"}</strong>
+              <span>{agentFaucetTokenAccount ? `Token account ${shortAddress(agentFaucetTokenAccount)}` : agentFaucetStatus}</span>
+            </div>
+            <div className="funding-strip-actions">
+              <a
+                className="button secondary small"
+                href="https://faucet.solana.com"
+                target="_blank"
+                rel="noreferrer"
+              >
+                <ExternalLink size={15} /> Get SOL
+              </a>
+              {selectedProvisionedAgent ? (
                 <a
-                  className="explorer-link"
-                  href="https://faucet.solana.com"
+                  className="button secondary small"
+                  href={getExplorerAddressUrl(selectedProvisionedAgent.publicKey)}
                   target="_blank"
                   rel="noreferrer"
                 >
-                  <ExternalLink size={15} /> Get devnet SOL
+                  <ExternalLink size={15} /> Explorer
                 </a>
-                {selectedProvisionedAgent ? (
-                  <a
-                    className="explorer-link"
-                    href={getExplorerAddressUrl(selectedProvisionedAgent.publicKey)}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    <ExternalLink size={15} /> View agent wallet
-                  </a>
-                ) : null}
-              </div>
-              <p>{agentFaucetStatus}</p>
-              {agentFaucetTokenAccount ? (
-                <p>
-                  Token account <strong>{agentFaucetTokenAccount}</strong>
-                </p>
               ) : null}
+              <button
+                className="button small"
+                type="button"
+                onClick={requestSelectedAgentTokens}
+                disabled={!selectedProvisionedAgent}
+              >
+                <FlaskConical size={15} /> Mint tokens
+              </button>
               {agentFaucetSignature ? (
                 <a
-                  className="explorer-link"
+                  className="icon-button"
                   href={getExplorerTransactionUrl(agentFaucetSignature)}
                   target="_blank"
                   rel="noreferrer"
+                  aria-label="View agent faucet transaction"
+                  title="View agent faucet transaction"
                 >
-                  <ExternalLink size={15} /> View agent faucet transaction
+                  <ExternalLink size={15} />
                 </a>
               ) : null}
-              <div className="button-row" style={{ marginTop: 12 }}>
-                <button
-                  className="button"
-                  type="button"
-                  onClick={requestSelectedAgentTokens}
-                  disabled={!selectedProvisionedAgent}
-                >
-                  <FlaskConical size={17} /> Mint tokens to selected agent
-                </button>
-              </div>
             </div>
           </div>
         </section>
@@ -1624,9 +1695,6 @@ function OperationsView({
             />
           </div>
           <div className="button-row" style={{ marginTop: 14 }}>
-            <button className="button secondary" type="button" onClick={signInOwnerWallet}>
-              <WalletCards size={17} /> Sign in with wallet
-            </button>
             <button
               className="button"
               type="button"
@@ -1644,21 +1712,25 @@ function OperationsView({
             </button>
           </div>
           {latestProvisionedApiKey ? (
-            <div className="devnet-card" style={{ marginTop: 14 }}>
+            <div className="devnet-card compact-copy-card" style={{ marginTop: 14 }}>
               <span>One-time agent API key</span>
-              <strong>{latestProvisionedApiKey}</strong>
+              <CopyField value={latestProvisionedApiKey} label="Copy agent API key" />
               <p>Copy this now. AgentWallet stores only the hash and will not show the full key again.</p>
             </div>
           ) : null}
           {telegramLinkCode ? (
-            <div className="devnet-card" style={{ marginTop: 14 }}>
+            <div className="devnet-card compact-copy-card" style={{ marginTop: 14 }}>
               <span>Telegram link command</span>
-              <strong>/link {telegramLinkCode}</strong>
-              <p>{telegramLinkStatus}</p>
+              <CopyField value={`/link ${telegramLinkCode}`} label="Copy Telegram link command" />
+              <TelegramLinkStatus text={telegramLinkStatus} />
             </div>
           ) : (
             <p className="inline-status">
               <Bot size={15} /> {telegramLinkStatus}
+              {" "}
+              <a className="explorer-link inline-link" href="https://t.me/agentspendbot" target="_blank" rel="noreferrer">
+                @agentspendbot
+              </a>
             </p>
           )}
           <div className="agent-table" style={{ marginTop: 14 }}>
@@ -1718,6 +1790,12 @@ function OperationsView({
               </div>
             )}
           </div>
+          <AgentSdkPanel
+            agentApiKey={agentApiKey}
+            executePaymentForm={executePaymentForm}
+            onchainPolicyForm={onchainPolicyForm}
+            selectedProvisionedAgent={selectedProvisionedAgent}
+          />
           <div className="setup-grid advanced-only" style={{ marginTop: 14 }}>
             <div className="event">
               <header>
@@ -2256,6 +2334,103 @@ Content-Type: application/json
         </section>
       </div>
     </section>
+  );
+}
+
+function AgentSdkPanel({
+  agentApiKey,
+  executePaymentForm,
+  onchainPolicyForm,
+  selectedProvisionedAgent
+}: {
+  agentApiKey: string;
+  executePaymentForm: typeof defaultExecutePaymentForm;
+  onchainPolicyForm: typeof defaultOnchainPolicyForm;
+  selectedProvisionedAgent: ProvisionedAgent | null;
+}) {
+  const sdkSnippet = `import { AgentWallet } from "@agentwallet/sdk";
+
+const wallet = new AgentWallet({
+  baseUrl: "${sdkBaseUrlExample}",
+  apiKey: process.env.AGENTWALLET_API_KEY!
+});
+
+const me = await wallet.getAgent();
+if (!me.status.readyForPayments) {
+  throw new Error("AgentWallet setup incomplete: " + me.status.missing.join(", "));
+}
+
+await wallet.pay({
+  recipient: "${executePaymentForm.recipient || "<recipient-public-key>"}",
+  amount: "${executePaymentForm.amount || "1"}"${
+    onchainPolicyForm.tokenMint ? `,
+  tokenMint: "${onchainPolicyForm.tokenMint}"` : ""
+  }
+});`;
+
+  return (
+    <div className="devnet-card sdk-card" style={{ marginTop: 14 }}>
+      <div>
+        <span className="eyebrow">Use from your AI agent</span>
+        <strong>{selectedProvisionedAgent ? selectedProvisionedAgent.name : "Select a hosted agent"}</strong>
+      </div>
+      <p>
+        Telegram is only one interface. A real AI agent should call AgentWallet through
+        the SDK or REST API using its hosted agent API key.
+      </p>
+      <pre className="code-panel">{sdkSnippet}</pre>
+      <div className="button-row">
+        <button
+          className="button secondary"
+          type="button"
+          onClick={() => void navigator.clipboard?.writeText(sdkSnippet)}
+        >
+          <KeyRound size={17} /> Copy SDK snippet
+        </button>
+        <a className="button secondary" href="/docs" target="_blank" rel="noreferrer">
+          <ExternalLink size={17} /> Agent docs
+        </a>
+      </div>
+      <p className="section-note">
+        Current API key: {agentApiKey ? "loaded in this browser" : "copy the one-time key after generation or rotation"}
+      </p>
+    </div>
+  );
+}
+
+function CopyField({ value, label }: { value: string; label: string }) {
+  return (
+    <div className="copy-field">
+      <input readOnly value={value} aria-label={label} onFocus={(event) => event.currentTarget.select()} />
+      <button
+        className="icon-button"
+        type="button"
+        aria-label={label}
+        title={label}
+        onClick={() => void navigator.clipboard?.writeText(value)}
+      >
+        <Copy size={15} />
+      </button>
+    </div>
+  );
+}
+
+function TelegramLinkStatus({ text }: { text: string }) {
+  const marker = "Open @agentspendbot";
+  const [before, after] = text.split(marker);
+
+  if (after === undefined) {
+    return <p>{text}</p>;
+  }
+
+  return (
+    <p>
+      {before}
+      <a className="explorer-link inline-link" href="https://t.me/agentspendbot" target="_blank" rel="noreferrer">
+        {marker}
+      </a>
+      {after}
+    </p>
   );
 }
 
@@ -2873,6 +3048,10 @@ async function readJsonResponse<T = unknown>(response: Response): Promise<T> {
   }
 
   return payload;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function upsertProvisionedAgent(agents: ProvisionedAgent[], agent: ProvisionedAgent) {
