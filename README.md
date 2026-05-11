@@ -1,8 +1,8 @@
-# AgentSpend
+# AgentWallet
 
 Brex/Ramp-style spend controls for AI agents on Solana.
 
-`x402` lets agents pay. AgentSpend lets owners control how autonomous agents
+`x402` lets agents pay. AgentWallet lets owners control how autonomous agents
 spend: budgets, approvals, vendor allowlists, recipient allowlists, and audit
 logs outside agent code.
 
@@ -20,7 +20,7 @@ logs outside agent code.
 - Policy simulator package for split-spend, unknown-vendor, and pause checks.
 - Solana devnet wallet flow for real Anchor policy accounts and policy-checked
   SPL-token payment execution.
-- Deployed devnet AgentSpend program:
+- Deployed devnet AgentWallet program:
   `9eZMFa68NmfF4YNz5cF96AsJukbRzvvP1TDktN4cfbDU`.
 - Devnet test token mint:
   `6XigBN521xmNyFV4DDgLpfGVsXTP3JstsaSTkbpNRXgk`.
@@ -51,7 +51,7 @@ For a fully self-serve judge demo:
 - `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` come from a Vercel
   Marketplace Redis/Upstash integration.
 - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` configure the shared
-  AgentSpend Telegram bot.
+  AgentWallet Telegram bot.
 
 Secret keys can be pasted as a JSON array from a Solana keypair file or as a
 comma-separated 64-byte list. Keep these devnet-only.
@@ -68,11 +68,11 @@ npm run dev
 
 4. Open the dashboard and connect Phantom.
 5. Click **Fund connected wallet**. This calls `/api/devnet/faucet` and mints
-   AgentSpend test tokens to the connected wallet.
+   AgentWallet test tokens to the connected wallet.
 6. In **Production agent setup**, click **Sign in with wallet**, sign the
    challenge, then click **Generate hosted agent**.
 7. Copy the one-time agent API key and fund the generated agent wallet/token
-   account with devnet SOL and AgentSpend test tokens.
+   account with devnet SOL and AgentWallet test tokens.
 8. Click **Use** on the hosted agent row, add allowed recipients, then click
    **Initialize on-chain policy** and approve in Phantom.
 9. Click **Link** on the hosted agent row and send the shown `/link CODE` to the
@@ -85,19 +85,19 @@ npm run dev
     transaction, and payment transaction.
 
 This path creates real devnet transactions and the SPL token transfer is routed
-through the deployed AgentSpend program.
+through the deployed AgentWallet program.
 
 ## Run the Anchor policy account flow
 
 The dashboard can now build real Anchor-compatible devnet transactions for the
-AgentSpend program:
+AgentWallet program:
 
 - `initialize_policy`
 - `update_policy`
 - `pause_policy`
 - `resume_policy`
 
-These transactions require the AgentSpend program to be deployed on devnet first.
+These transactions require the AgentWallet program to be deployed on devnet first.
 Until then, Phantom can sign the transaction but devnet will reject it because the
 program account does not exist.
 
@@ -136,7 +136,7 @@ from:
 
 The dashboard now defaults to the deployed devnet program ID and locks it in the
 UI. Owners should not enter arbitrary program IDs in normal use; that value is
-part of the trusted AgentSpend deployment.
+part of the trusted AgentWallet deployment.
 
 ## Run the policy-gated payment executor
 
@@ -189,8 +189,8 @@ This is the integration point for Telegram:
 
 1. Telegram bot receives `pay 1 token to <recipient>`.
 2. Bot/backend parses the recipient, amount, token, and target policy.
-3. Bot resolves the Telegram chat to a provisioned AgentSpend agent.
-4. AgentSpend signs as that generated hosted agent wallet.
+3. Bot resolves the Telegram chat to a provisioned AgentWallet agent.
+4. AgentWallet signs as that generated hosted agent wallet.
 5. The Solana program approves or rejects the transfer on-chain.
 
 The dashboard includes an **AI agent chat** tab that simulates the Telegram
@@ -251,7 +251,7 @@ send 1 token to <recipient-wallet>
 ```
 
 The Telegram bot uses the same parser and backend executor as AI Agent Chat.
-The backend signs as the linked provisioned agent wallet, and the AgentSpend
+The backend signs as the linked provisioned agent wallet, and the AgentWallet
 program approves or rejects the transfer on-chain.
 
 ## Devnet faucet API

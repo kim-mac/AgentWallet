@@ -12,23 +12,23 @@ import {
   getProvisioningStore,
   type ProvisionedAgentRecord
 } from "./provisioning-store";
-import {
-  defaultAgentSpendProgramId,
-  defaultDevnetUsdcMint
-} from "./solana-devnet";
+import { defaultAgentSpendProgramId } from "./solana-devnet";
+import { appendAuditEvent } from "./audit-log";
+
+const optionalPublicKeyString = z.union([z.string().trim().min(32), z.literal("")]);
 
 export const createAgentSchema = z.object({
   name: z.string().trim().min(1).max(64),
   programId: z.string().min(32).default(defaultAgentSpendProgramId),
   policyPda: z.string().min(32).optional().nullable(),
-  tokenMint: z.string().min(32).default(defaultDevnetUsdcMint),
+  tokenMint: optionalPublicKeyString.optional().default(""),
   decimals: z.coerce.number().int().min(0).max(9).default(6)
 });
 
 export const updateAgentConfigSchema = z.object({
   programId: z.string().min(32).optional(),
   policyPda: z.string().min(32).nullable().optional(),
-  tokenMint: z.string().min(32).optional(),
+  tokenMint: optionalPublicKeyString.optional(),
   decimals: z.coerce.number().int().min(0).max(9).optional()
 });
 
@@ -60,6 +60,14 @@ export async function createProvisionedAgent(owner: string, input: unknown) {
   };
 
   await getProvisioningStore().saveAgent(record);
+  await appendAuditEvent({
+    owner,
+    agentId: record.id,
+    type: "agent_created",
+    message: `Hosted AgentWallet created for ${record.publicKey}.`,
+    status: "info",
+    metadata: { publicKey: record.publicKey }
+  });
 
   return {
     agent: toPublicAgent(record),
@@ -98,6 +106,13 @@ export async function rotateProvisionedAgentApiKey(owner: string, agentId: strin
   };
 
   await getProvisioningStore().saveAgent(updated);
+  await appendAuditEvent({
+    owner,
+    agentId,
+    type: "api_key_rotated",
+    message: "Agent API key rotated.",
+    status: "info"
+  });
   return {
     agent: toPublicAgent(updated),
     apiKey

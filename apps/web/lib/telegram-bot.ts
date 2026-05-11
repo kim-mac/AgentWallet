@@ -73,7 +73,7 @@ export function formatTelegramFailure(error: unknown) {
 
 export function formatTelegramHelp() {
   return [
-    "AgentSpend is ready.",
+    "AgentWallet is ready.",
     "",
     "Link this chat from the dashboard:",
     "/link <code>",

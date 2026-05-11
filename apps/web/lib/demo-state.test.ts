@@ -6,7 +6,45 @@ import {
   serializeDemoState,
   updatePolicyFromForm
 } from "./demo-state";
-import { policy, paymentRequests } from "./demo-data";
+import { policy } from "./demo-data";
+
+const configuredPolicy = {
+  ...policy,
+  id: "policy_test",
+  agentId: "agent_test",
+  tokenMint: "USDC",
+  maxPerPaymentUsd: 40,
+  dailyBudgetUsd: 200,
+  approvalThresholdUsd: 25,
+  allowedVendors: ["vendor_allowed"],
+  allowedCategories: ["data"],
+  allowedRecipients: ["recipient_allowed"]
+};
+
+const paymentRequests = [
+  {
+    id: "pay_allowed",
+    agentId: "agent_test",
+    vendorId: "vendor_allowed",
+    vendorName: "Allowed Vendor",
+    category: "data",
+    recipient: "recipient_allowed",
+    tokenMint: "USDC",
+    amountUsd: 12,
+    requestedAt: "2026-05-08T18:00:00.000Z"
+  },
+  {
+    id: "pay_denied",
+    agentId: "agent_test",
+    vendorId: "vendor_unknown",
+    vendorName: "Unknown Vendor",
+    category: "data",
+    recipient: "recipient_allowed",
+    tokenMint: "USDC",
+    amountUsd: 12,
+    requestedAt: "2026-05-08T18:12:00.000Z"
+  }
+];
 
 describe("demo-state helpers", () => {
   it("normalizes comma-separated policy lists", () => {
@@ -39,45 +77,45 @@ describe("demo-state helpers", () => {
   });
 
   it("builds an audit event from the active policy evaluation", () => {
-    const deniedRequest = paymentRequests[2];
+    const deniedRequest = paymentRequests[1];
     expect(deniedRequest).toBeDefined();
 
-    const event = buildSpendEvent(policy, deniedRequest!);
+    const event = buildSpendEvent(configuredPolicy, deniedRequest!);
 
     expect(event.decision).toBe("denied");
     expect(event.reasons).toContain("Vendor is not allowlisted.");
-    expect(event.policyId).toBe(policy.id);
+    expect(event.policyId).toBe(configuredPolicy.id);
   });
 
   it("serializes demo state for browser persistence", () => {
     const serialized = serializeDemoState({
-      policy,
+      policy: configuredPolicy,
       requests: paymentRequests,
       events: []
     });
 
     expect(JSON.parse(serialized)).toMatchObject({
-      policy: { id: policy.id },
+      policy: { id: configuredPolicy.id },
       requests: expect.any(Array),
       events: []
     });
   });
 
   it("builds an x402-style payment payload for agent calls", () => {
-    const payload = buildX402PaymentPayload(policy, paymentRequests[0]!);
+    const payload = buildX402PaymentPayload(configuredPolicy, paymentRequests[0]!);
 
     expect(payload).toMatchObject({
       x402Version: "0.1-demo",
       network: "solana-localnet",
       asset: "USDC",
-      agentId: policy.agentId,
+      agentId: configuredPolicy.agentId,
       payment: {
         amountUsd: paymentRequests[0]!.amountUsd,
         recipient: paymentRequests[0]!.recipient
       },
       policy: {
-        policyId: policy.id,
-        approvalThresholdUsd: policy.approvalThresholdUsd
+        policyId: configuredPolicy.id,
+        approvalThresholdUsd: configuredPolicy.approvalThresholdUsd
       }
     });
   });

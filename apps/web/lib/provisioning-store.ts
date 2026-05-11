@@ -32,6 +32,19 @@ export type TelegramLinkRecord = {
   expiresAt: string;
 };
 
+export type AuditEventRecord = {
+  id: string;
+  owner: string;
+  agentId: string | null;
+  type: string;
+  message: string;
+  status: "approved" | "rejected" | "info";
+  signature?: string;
+  explorerUrl?: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+};
+
 export type ProvisioningStore = {
   saveChallenge(record: OwnerChallengeRecord): Promise<void>;
   getChallenge(owner: string): Promise<OwnerChallengeRecord | null>;
@@ -46,6 +59,8 @@ export type ProvisioningStore = {
   getAgentByTelegramChat(chatId: string): Promise<ProvisionedAgentRecord | null>;
   linkTelegramChat(agentId: string, chatId: string): Promise<ProvisionedAgentRecord>;
   unlinkTelegramChat(agentId: string): Promise<ProvisionedAgentRecord>;
+  appendAuditEvent(record: AuditEventRecord): Promise<void>;
+  listAuditEvents(owner: string, agentId?: string): Promise<AuditEventRecord[]>;
 };
 
 type MemoryProvisioningState = {
@@ -55,6 +70,9 @@ type MemoryProvisioningState = {
   apiKeys: Map<string, string>;
   telegramLinks: Map<string, TelegramLinkRecord>;
   telegramChats: Map<string, string>;
+  auditEvents: Map<string, AuditEventRecord>;
+  ownerAuditEvents: Map<string, string[]>;
+  agentAuditEvents: Map<string, string[]>;
 };
 
 const memory = getMemoryState();
@@ -76,6 +94,9 @@ export function resetMemoryProvisioningStore() {
   memory.apiKeys.clear();
   memory.telegramLinks.clear();
   memory.telegramChats.clear();
+  memory.auditEvents.clear();
+  memory.ownerAuditEvents.clear();
+  memory.agentAuditEvents.clear();
 }
 
 const memoryStore: ProvisioningStore = {
@@ -140,6 +161,29 @@ const memoryStore: ProvisioningStore = {
     const updated = { ...agent, telegramChatId: null, updatedAt: new Date().toISOString() };
     memory.agents.set(agentId, updated);
     return updated;
+  },
+  async appendAuditEvent(record) {
+    memory.auditEvents.set(record.id, record);
+    memory.ownerAuditEvents.set(record.owner, [
+      record.id,
+      ...(memory.ownerAuditEvents.get(record.owner) ?? [])
+    ]);
+    if (record.agentId) {
+      memory.agentAuditEvents.set(record.agentId, [
+        record.id,
+        ...(memory.agentAuditEvents.get(record.agentId) ?? [])
+      ]);
+    }
+  },
+  async listAuditEvents(owner, agentId) {
+    const eventIds = agentId
+      ? memory.agentAuditEvents.get(agentId) ?? []
+      : memory.ownerAuditEvents.get(owner) ?? [];
+
+    return eventIds
+      .map((eventId) => memory.auditEvents.get(eventId))
+      .filter((event): event is AuditEventRecord => Boolean(event && event.owner === owner))
+      .slice(0, 50);
   }
 };
 
@@ -205,6 +249,24 @@ const redisStore: ProvisioningStore = {
     const updated = { ...agent, telegramChatId: null, updatedAt: new Date().toISOString() };
     await this.saveAgent(updated);
     return updated;
+  },
+  async appendAuditEvent(record) {
+    const client = getRedis();
+    await client.set(auditEventKey(record.id), record);
+    await client.lpush(ownerAuditKey(record.owner), record.id);
+    await client.ltrim(ownerAuditKey(record.owner), 0, 99);
+    if (record.agentId) {
+      await client.lpush(agentAuditKey(record.agentId), record.id);
+      await client.ltrim(agentAuditKey(record.agentId), 0, 99);
+    }
+  },
+  async listAuditEvents(owner, agentId) {
+    const client = getRedis();
+    const eventIds = agentId
+      ? await client.lrange<string>(agentAuditKey(agentId), 0, 49)
+      : await client.lrange<string>(ownerAuditKey(owner), 0, 49);
+    const events = await Promise.all((eventIds ?? []).map((eventId) => client.get<AuditEventRecord>(auditEventKey(eventId))));
+    return events.filter((event): event is AuditEventRecord => Boolean(event && event.owner === owner));
   }
 };
 
@@ -237,7 +299,10 @@ function getMemoryState(): MemoryProvisioningState {
     ownerAgents: new Map<string, Set<string>>(),
     apiKeys: new Map<string, string>(),
     telegramLinks: new Map<string, TelegramLinkRecord>(),
-    telegramChats: new Map<string, string>()
+    telegramChats: new Map<string, string>(),
+    auditEvents: new Map<string, AuditEventRecord>(),
+    ownerAuditEvents: new Map<string, string[]>(),
+    agentAuditEvents: new Map<string, string[]>()
   };
 
   return globalState.__agentspendProvisioningMemory;
@@ -276,4 +341,16 @@ function telegramLinkKey(code: string) {
 
 function telegramChatKey(chatId: string) {
   return `agentspend:telegram-chat:${chatId}`;
+}
+
+function auditEventKey(eventId: string) {
+  return `agentwallet:audit:${eventId}`;
+}
+
+function ownerAuditKey(owner: string) {
+  return `agentwallet:owner:${owner}:audit`;
+}
+
+function agentAuditKey(agentId: string) {
+  return `agentwallet:agent:${agentId}:audit`;
 }

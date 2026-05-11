@@ -3,8 +3,8 @@ import {
   AgentExecutionError,
   executeProvisionedAgentPayment,
   withAgentExecutionTimeout
-} from "../../../../../lib/agent-executor";
-import { authorizeAgentRequest } from "../../../../../lib/agent-request-auth";
+} from "../../../../lib/agent-executor";
+import { authorizeAgentRequest } from "../../../../lib/agent-request-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +12,6 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   try {
     const apiKey = authorizeAgentRequest(request);
-
     const result = await withAgentExecutionTimeout(
       executeProvisionedAgentPayment(apiKey, await request.json())
     );
@@ -22,19 +21,8 @@ export async function POST(request: Request) {
     const status = error instanceof AgentExecutionError ? error.status : 400;
 
     return NextResponse.json(
-      {
-        ok: false,
-        error: getErrorMessage(error)
-      },
+      { ok: false, error: error instanceof Error ? error.message : "AgentWallet payment failed." },
       { status }
     );
   }
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return "Unexpected agent execution error.";
 }

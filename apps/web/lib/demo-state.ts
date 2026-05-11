@@ -18,9 +18,9 @@ export type PolicyFormValues = {
 
 export function policyToFormValues(policy: AgentPolicy): PolicyFormValues {
   return {
-    maxPerPaymentUsd: String(policy.maxPerPaymentUsd),
-    dailyBudgetUsd: String(policy.dailyBudgetUsd),
-    approvalThresholdUsd: String(policy.approvalThresholdUsd),
+    maxPerPaymentUsd: numberToFormValue(policy.maxPerPaymentUsd),
+    dailyBudgetUsd: numberToFormValue(policy.dailyBudgetUsd),
+    approvalThresholdUsd: numberToFormValue(policy.approvalThresholdUsd),
     allowedVendors: policy.allowedVendors.join(", "),
     allowedCategories: policy.allowedCategories.join(", "),
     allowedRecipients: policy.allowedRecipients.join(", ")
@@ -128,4 +128,8 @@ export function buildX402PaymentPayload(
 function parsePositiveNumber(value: string, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function numberToFormValue(value: number): string {
+  return value > 0 ? String(value) : "";
 }

@@ -12,7 +12,7 @@ export function buildWalletChallengeMessage(owner: string, nonce = createId("non
     owner,
     nonce,
     message: [
-      "Sign in to AgentSpend",
+      "Sign in to AgentWallet",
       "",
       `Owner: ${owner}`,
       `Nonce: ${nonce}`,

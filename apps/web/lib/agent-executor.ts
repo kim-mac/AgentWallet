@@ -14,6 +14,7 @@ import {
   getExplorerTransactionUrl
 } from "./solana-devnet";
 import { loadKeypairFromEnv } from "./server-wallet";
+import { appendAuditEvent } from "./audit-log";
 
 export const agentExecutionTimeoutMs = 45_000;
 
@@ -76,14 +77,47 @@ export async function executeProvisionedAgentRecordPayment(
   const body = executePaymentSchema.parse(input);
   const agent = decryptAgentKeypair(agentRecord);
 
-  return executePaymentWithAgent(agent, {
-    programId: body.programId ?? agentRecord.programId,
-    policyPda: requirePolicyPda(body.policyPda ?? agentRecord.policyPda),
-    recipient: body.recipient,
-    tokenMint: body.tokenMint ?? agentRecord.tokenMint,
-    amount: body.amount,
-    decimals: body.decimals ?? agentRecord.decimals
-  });
+  try {
+    const result = await executePaymentWithAgent(agent, {
+      programId: body.programId ?? agentRecord.programId,
+      policyPda: requirePolicyPda(body.policyPda ?? agentRecord.policyPda),
+      recipient: body.recipient,
+      tokenMint: body.tokenMint ?? agentRecord.tokenMint,
+      amount: body.amount,
+      decimals: body.decimals ?? agentRecord.decimals
+    });
+
+    await appendAuditEvent({
+      owner: agentRecord.owner,
+      agentId: agentRecord.id,
+      type: "payment_approved",
+      message: `Policy-gated payment of ${result.amount} confirmed on devnet.`,
+      status: "approved",
+      signature: result.signature,
+      explorerUrl: result.explorerUrl,
+      metadata: {
+        recipient: body.recipient,
+        tokenMint: result.tokenMint,
+        policyPda: result.policyPda
+      }
+    });
+
+    return result;
+  } catch (error) {
+    await appendAuditEvent({
+      owner: agentRecord.owner,
+      agentId: agentRecord.id,
+      type: "payment_rejected",
+      message: error instanceof Error ? error.message : "Payment rejected by policy.",
+      status: "rejected",
+      metadata: {
+        recipient: body.recipient,
+        amount: body.amount,
+        tokenMint: body.tokenMint ?? agentRecord.tokenMint
+      }
+    });
+    throw error;
+  }
 }
 
 async function executePaymentWithAgent(

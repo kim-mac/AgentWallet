@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AgentSpend",
-  description: "Spend controls for Solana AI agents"
+  title: "AgentWallet",
+  description: "Wallets for AI agents with owner-controlled spending policies"
 };
 
 export default function RootLayout({

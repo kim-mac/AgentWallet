@@ -40,7 +40,6 @@ import {
   buildUpdatePolicyInstruction,
   createDevnetConnection,
   defaultAgentSpendProgramId,
-  defaultDevnetUsdcMint,
   derivePolicyPda,
   getExplorerAddressUrl,
   getExplorerTransactionUrl,
@@ -48,42 +47,28 @@ import {
   parsePublicKey
 } from "../lib/solana-devnet";
 
-const storageKey = "agentspend.demo-state.v1";
+const storageKey = "agentwallet.dashboard-state.v2";
 const agentRegistryStorageKey = "agentspend.agent-registry.v1";
+const demoMerchantResourcePath = "/api/demo-merchant/resource";
+const sdkBaseUrlExample = "https://your-agentwallet.vercel.app";
 
 const defaultOnchainPolicyForm = {
   programId: defaultAgentSpendProgramId,
   agent: "",
-  tokenMint: defaultDevnetUsdcMint,
-  allowedRecipients: "ELCt5nsW3HNBesvuynh94VnmKZosrUcncuEP89XDJFDH",
-  periodSeconds: "86400"
+  tokenMint: "",
+  allowedRecipients: "",
+  periodSeconds: ""
 };
 
 const defaultExecutePaymentForm = {
   recipient: "",
-  amount: "1",
-  decimals: "6"
+  amount: "",
+  decimals: ""
 };
 
-const vendorPresets = [
-  { label: "Jupiter Swap Program", value: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4" },
-  { label: "SPL Token Program", value: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" },
-  { label: "Associated Token Program", value: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" },
-  { label: "Memo Program", value: "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" }
-];
-
-const categoryPresets = [
-  { label: "Data APIs", value: "data" },
-  { label: "Trading / Swaps", value: "trading" },
-  { label: "AI Inference", value: "inference" },
-  { label: "Storage", value: "storage" },
-  { label: "Automation", value: "automation" }
-];
-
-const tokenMintPresets = [
-  { label: "AgentSpend Test Token", value: defaultDevnetUsdcMint },
-  { label: "Devnet USDC", value: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" }
-];
+const vendorPresets: Array<{ label: string; value: string }> = [];
+const categoryPresets: Array<{ label: string; value: string }> = [];
+const tokenMintPresets: Array<{ label: string; value: string }> = [];
 
 type CatalogItem = {
   id: string;
@@ -92,21 +77,8 @@ type CatalogItem = {
   selected: boolean;
 };
 
-const defaultProductCatalog: CatalogItem[] = vendorPresets.map((preset) => ({
-  id: `product_${preset.value}`,
-  label: preset.label,
-  value: preset.value,
-  selected: false
-}));
-
-const defaultRecipientCatalog: CatalogItem[] = [
-  {
-    id: "recipient_demo",
-    label: "Demo recipient",
-    value: "ELCt5nsW3HNBesvuynh94VnmKZosrUcncuEP89XDJFDH",
-    selected: true
-  }
-];
+const defaultProductCatalog: CatalogItem[] = [];
+const defaultRecipientCatalog: CatalogItem[] = [];
 
 type DashboardView = "operations" | "simulator" | "audit";
 
@@ -143,6 +115,16 @@ type ProvisionedAgent = {
   telegramChatId: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+type AgentWalletAuditEvent = {
+  id: string;
+  type: string;
+  message: string;
+  status: "approved" | "rejected" | "info";
+  signature?: string;
+  explorerUrl?: string;
+  createdAt: string;
 };
 
 export default function Dashboard() {
@@ -186,10 +168,10 @@ export default function Dashboard() {
   const [agentTokenAccount, setAgentTokenAccount] = useState<string | null>(null);
   const [recipientTokenAccount, setRecipientTokenAccount] = useState<string | null>(null);
   const [faucetStatus, setFaucetStatus] = useState(
-    "Connect Phantom, then fund the connected devnet wallet with AgentSpend test tokens."
+    "Connect Phantom, then fund the connected devnet wallet with AgentWallet test tokens."
   );
   const [agentFaucetStatus, setAgentFaucetStatus] = useState(
-    "Select a hosted agent, then mint AgentSpend test tokens to its wallet."
+    "Select a hosted agent, then mint AgentWallet test tokens to its wallet."
   );
   const [faucetTokenAccount, setFaucetTokenAccount] = useState<string | null>(null);
   const [faucetSignature, setFaucetSignature] = useState<string | null>(null);
@@ -210,10 +192,15 @@ export default function Dashboard() {
   const [ownerAuthStatus, setOwnerAuthStatus] = useState("Connect wallet and sign once to provision hosted agents.");
   const [provisionedAgents, setProvisionedAgents] = useState<ProvisionedAgent[]>([]);
   const [selectedProvisionedAgentId, setSelectedProvisionedAgentId] = useState<string | null>(null);
-  const [newAgentName, setNewAgentName] = useState("Demo Telegram agent");
+  const [newAgentName, setNewAgentName] = useState("");
   const [latestProvisionedApiKey, setLatestProvisionedApiKey] = useState<string | null>(null);
   const [telegramLinkStatus, setTelegramLinkStatus] = useState("Create a link code, then send it to the shared Telegram bot.");
   const [telegramLinkCode, setTelegramLinkCode] = useState<string | null>(null);
+  const [serverAuditEvents, setServerAuditEvents] = useState<AgentWalletAuditEvent[]>([]);
+  const [x402Status, setX402Status] = useState("Run the paid API demo after selecting a funded hosted agent.");
+  const [x402ExplorerUrl, setX402ExplorerUrl] = useState<string | null>(null);
+  const [x402Response, setX402Response] = useState<string | null>(null);
+  const [isX402Executing, setIsX402Executing] = useState(false);
 
   const simulatorFindings = useMemo(() => simulatePolicyAttacks(policy), [policy]);
   const selectedProvisionedAgent = useMemo(
@@ -242,7 +229,11 @@ export default function Dashboard() {
     [agentRegistry, onchainPolicyForm.programId, walletAddress]
   );
   const remainingBudget = policy.dailyBudgetUsd - policy.spentTodayUsd;
-  const deniedEvents = events.filter((event) => event.decision === "denied");
+  const displayedAuditEvents = useMemo(
+    () => [...serverAuditEvents.map(auditEventToSpendEvent), ...events],
+    [events, serverAuditEvents]
+  );
+  const deniedEvents = displayedAuditEvents.filter((event) => event.decision === "denied");
 
   useEffect(() => {
     const snapshot = parseDemoState(window.localStorage.getItem(storageKey));
@@ -435,11 +426,32 @@ export default function Dashboard() {
     setProvisionedAgents(payload.agents);
   }
 
+  async function loadAgentWalletAudit(apiKey = agentApiKey.trim()) {
+    if (!apiKey) {
+      return;
+    }
+
+    const response = await fetch("/api/agent-wallet/audit", {
+      cache: "no-store",
+      headers: { Authorization: `Bearer ${apiKey}` }
+    });
+    const payload = await readJsonResponse<{ events: AgentWalletAuditEvent[] }>(response);
+    setServerAuditEvents(payload.events);
+  }
+
   async function createHostedAgent() {
     if (!walletAddress) {
       setOwnerAuthStatus("Connect and sign with the owner wallet before creating an agent.");
       return;
     }
+
+    const trimmedName = newAgentName.trim();
+    if (!trimmedName) {
+      setOwnerAuthStatus("Enter an agent name before generating a hosted wallet.");
+      return;
+    }
+
+    const tokenMint = onchainPolicyForm.tokenMint.trim();
 
     try {
       setOwnerAuthStatus("Creating hosted agent wallet and API key...");
@@ -447,10 +459,10 @@ export default function Dashboard() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: newAgentName,
+          name: trimmedName,
           programId: onchainPolicyForm.programId,
           policyPda,
-          tokenMint: onchainPolicyForm.tokenMint,
+          ...(tokenMint ? { tokenMint } : {}),
           decimals: Number(executePaymentForm.decimals) || 6
         })
       });
@@ -462,6 +474,7 @@ export default function Dashboard() {
       setAgentApiKey(payload.apiKey);
       loadProvisionedAgentIntoPolicy(payload.agent);
       setOwnerAuthStatus("Hosted agent created. Copy the API key now; it will not be shown again.");
+      await loadAgentWalletAudit(payload.apiKey);
     } catch (error) {
       setOwnerAuthStatus(getErrorMessage(error));
     }
@@ -476,6 +489,7 @@ export default function Dashboard() {
       setLatestProvisionedApiKey(payload.apiKey);
       setAgentApiKey(payload.apiKey);
       setOwnerAuthStatus("API key rotated. Copy the new key now; the old key no longer works.");
+      await loadAgentWalletAudit(payload.apiKey);
     } catch (error) {
       setOwnerAuthStatus(getErrorMessage(error));
     }
@@ -531,7 +545,7 @@ export default function Dashboard() {
         ? "Hosted agent loaded into the Anchor policy card. Checking its policy account..."
         : walletAddress
           ? "Hosted agent loaded into the Anchor policy card. Initialize its policy account next."
-          : "Hosted agent selected. Connect the owner wallet so AgentSpend can derive and initialize its policy PDA."
+          : "Hosted agent selected. Connect the owner wallet so AgentWallet can derive and initialize its policy PDA."
     );
   }
 
@@ -788,7 +802,7 @@ export default function Dashboard() {
           paymentId: `anchor_${action}`,
           decision: "approved",
           amountUsd: 0,
-          vendorName: "AgentSpend program",
+          vendorName: "AgentWallet program",
           category: "policy_account",
           createdAt: new Date().toISOString(),
           reasons: [`Anchor ${action} transaction confirmed: ${signature}.`]
@@ -864,7 +878,7 @@ export default function Dashboard() {
           paymentId: "execute_payment",
           decision: "approved",
           amountUsd: Number(executePaymentForm.amount) || 0,
-          vendorName: "AgentSpend execute_payment",
+          vendorName: "AgentWallet execute_payment",
           category: "token_transfer",
           createdAt: new Date().toISOString(),
           reasons: [`Program-routed payment confirmed: ${signature}.`]
@@ -924,14 +938,14 @@ export default function Dashboard() {
 
   async function requestSelectedAgentTokens() {
     if (!selectedProvisionedAgent) {
-      setAgentFaucetStatus("Select a hosted agent before minting AgentSpend test tokens.");
+      setAgentFaucetStatus("Select a hosted agent before minting AgentWallet test tokens.");
       return;
     }
 
     try {
       setAgentFaucetTokenAccount(null);
       setAgentFaucetSignature(null);
-      setAgentFaucetStatus(`Minting AgentSpend test tokens to ${shortAddress(selectedProvisionedAgent.publicKey)}...`);
+      setAgentFaucetStatus(`Minting AgentWallet test tokens to ${shortAddress(selectedProvisionedAgent.publicKey)}...`);
 
       const result = await fetch("/api/devnet/faucet", {
         method: "POST",
@@ -956,7 +970,7 @@ export default function Dashboard() {
 
       setAgentFaucetTokenAccount(payload.tokenAccount ?? null);
       setAgentFaucetSignature(payload.signature ?? null);
-      setAgentFaucetStatus("Selected hosted agent funded with AgentSpend test tokens.");
+      setAgentFaucetStatus("Selected hosted agent funded with AgentWallet test tokens.");
     } catch (error) {
       setAgentFaucetStatus(getErrorMessage(error));
     }
@@ -995,7 +1009,7 @@ export default function Dashboard() {
       const parsed = parseAgentCommand(command);
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 50_000);
-      const response = await fetch("/api/agent/payments/execute", {
+      const response = await fetch("/api/agent-wallet/pay", {
         method: "POST",
         signal: controller.signal,
         headers: {
@@ -1025,6 +1039,7 @@ export default function Dashboard() {
 
       setExecuteSignature(payload.signature ?? null);
       setExecuteStatus("Agent API executed a policy-gated payment on devnet.");
+      await loadAgentWalletAudit();
       setAgentMessages((current) => [
         ...current,
         {
@@ -1036,6 +1051,14 @@ export default function Dashboard() {
         }
       ]);
     } catch (error) {
+      if (agentApiKey.trim()) {
+        try {
+          await loadAgentWalletAudit();
+        } catch {
+          // The visible chat error should stay focused on the payment result.
+        }
+      }
+
       setAgentMessages((current) => [
         ...current,
         {
@@ -1050,6 +1073,58 @@ export default function Dashboard() {
       ]);
     } finally {
       setIsAgentExecuting(false);
+    }
+  }
+
+  async function runX402Demo() {
+    if (!agentApiKey.trim()) {
+      setX402Status("Paste the hosted agent API key first.");
+      return;
+    }
+
+    setIsX402Executing(true);
+    setX402ExplorerUrl(null);
+    setX402Response(null);
+
+    try {
+      setX402Status("Requesting paid API resource...");
+      const challengeResponse = await fetch(demoMerchantResourcePath, { cache: "no-store" });
+      const paymentRequiredHeader = challengeResponse.headers.get("PAYMENT-REQUIRED");
+
+      if (challengeResponse.status !== 402 || !paymentRequiredHeader) {
+        throw new Error("Demo merchant did not return an x402 payment challenge.");
+      }
+
+      const challengeBody = await challengeResponse.json();
+      setX402Status("x402 challenge received. Settling through AgentWallet policy engine...");
+
+      const settleResponse = await fetch("/api/x402/settle", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${agentApiKey.trim()}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ paymentRequired: challengeBody.paymentRequired })
+      });
+      const settlement = await readJsonResponse<{
+        paymentSignature: string;
+        paymentPayload: { payload: { transaction: string } };
+      }>(settleResponse);
+
+      setX402Status("Payment settled. Retrying paid API with PAYMENT-SIGNATURE...");
+      const paidResponse = await fetch(demoMerchantResourcePath, {
+        headers: { "PAYMENT-SIGNATURE": settlement.paymentSignature }
+      });
+      const paidPayload = await readJsonResponse<Record<string, unknown>>(paidResponse);
+
+      setX402ExplorerUrl(getExplorerTransactionUrl(settlement.paymentPayload.payload.transaction));
+      setX402Response(JSON.stringify(paidPayload, null, 2));
+      setX402Status("x402 paid API completed with an on-chain AgentWallet payment.");
+      await loadAgentWalletAudit();
+    } catch (error) {
+      setX402Status(getErrorMessage(error));
+    } finally {
+      setIsX402Executing(false);
     }
   }
 
@@ -1076,8 +1151,8 @@ export default function Dashboard() {
     setFaucetSignature(null);
     setAgentFaucetTokenAccount(null);
     setAgentFaucetSignature(null);
-    setFaucetStatus("Connect Phantom, then fund the connected devnet wallet with AgentSpend test tokens.");
-    setAgentFaucetStatus("Select a hosted agent, then mint AgentSpend test tokens to its wallet.");
+    setFaucetStatus("Connect Phantom, then fund the connected devnet wallet with AgentWallet test tokens.");
+    setAgentFaucetStatus("Select a hosted agent, then mint AgentWallet test tokens to its wallet.");
     setAgentCommand("");
     setAgentApiKey("");
     setAgentMessages([
@@ -1095,11 +1170,13 @@ export default function Dashboard() {
     <div className="shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">A</div>
+          <div className="brand-mark" aria-hidden="true">
+            <AgentWalletMark />
+          </div>
           <div>
-            <strong>AgentSpend</strong>
+            <strong>AgentWallet</strong>
             <br />
-            <span>Policy controls</span>
+            <span>non-custodial · policy-enforced</span>
           </div>
         </div>
         <nav className="nav" aria-label="Primary">
@@ -1130,10 +1207,10 @@ export default function Dashboard() {
       <main className="main">
         <header className="topbar" id="overview">
           <div className="page-title">
-            <h1>Agent-native spend controls on Solana</h1>
+            <h1>Give your AI agent a wallet.</h1>
             <p>
-              Owners set policy. Agents execute payments. AgentSpend enforces
-              the wallet rules on-chain before tokens move.
+              AgentWallet lets agents pay, swap, and settle through wallets that
+              owners can actually control.
             </p>
           </div>
           <div className="top-actions">
@@ -1152,9 +1229,9 @@ export default function Dashboard() {
         </header>
 
         <section className="grid metrics" aria-label="Metrics">
-          <Metric label="Daily budget" value={`$${policy.dailyBudgetUsd}`} />
-          <Metric label="Remaining today" value={`$${remainingBudget}`} />
-          <Metric label="Approval threshold" value={`$${policy.approvalThresholdUsd}`} />
+          <Metric label="Daily budget" value={formatUsdMetric(policy.dailyBudgetUsd)} />
+          <Metric label="Remaining today" value={formatUsdMetric(remainingBudget)} />
+          <Metric label="Autonomous limit" value={formatUsdMetric(policy.approvalThresholdUsd)} />
           <Metric label="Policy violations" value={String(deniedEvents.length)} />
         </section>
 
@@ -1165,6 +1242,7 @@ export default function Dashboard() {
             anchorStatus={anchorStatus}
             applyPolicyUpdate={applyPolicyUpdate}
             events={events}
+            runX402Demo={runX402Demo}
             executePaymentForm={executePaymentForm}
             executePolicyPayment={executePolicyPayment}
             executeSignature={executeSignature}
@@ -1182,6 +1260,7 @@ export default function Dashboard() {
             agentRegistryForm={agentRegistryForm}
             draftPolicyStatus={draftPolicyStatus}
             isAgentExecuting={isAgentExecuting}
+            isX402Executing={isX402Executing}
             onchainPolicyForm={onchainPolicyForm}
             policy={policy}
             policyAccountStatus={policyAccountStatus}
@@ -1210,6 +1289,9 @@ export default function Dashboard() {
             togglePause={togglePause}
             useRegisteredAgent={useRegisteredAgent}
             walletAddress={walletAddress}
+            x402ExplorerUrl={x402ExplorerUrl}
+            x402Response={x402Response}
+            x402Status={x402Status}
             selectedProvisionedAgent={selectedProvisionedAgent}
             ownerAuthStatus={ownerAuthStatus}
             provisionedAgents={provisionedAgents}
@@ -1230,7 +1312,7 @@ export default function Dashboard() {
         ) : activeView === "simulator" ? (
           <SimulatorView findings={simulatorFindings} />
         ) : (
-          <AuditLogView events={events} />
+          <AuditLogView events={displayedAuditEvents} />
         )}
       </main>
     </div>
@@ -1243,6 +1325,7 @@ function OperationsView({
   anchorStatus,
   applyPolicyUpdate,
   events,
+  runX402Demo,
   executePaymentForm,
   executePolicyPayment,
   executeSignature,
@@ -1260,6 +1343,7 @@ function OperationsView({
   agentRegistryForm,
   draftPolicyStatus,
   isAgentExecuting,
+  isX402Executing,
   onchainPolicyForm,
   policy,
   policyAccountStatus,
@@ -1288,6 +1372,9 @@ function OperationsView({
   togglePause,
   useRegisteredAgent,
   walletAddress,
+  x402ExplorerUrl,
+  x402Response,
+  x402Status,
   selectedProvisionedAgent,
   ownerAuthStatus,
   provisionedAgents,
@@ -1310,6 +1397,7 @@ function OperationsView({
   anchorStatus: string;
   applyPolicyUpdate: () => void;
   events: SpendEvent[];
+  runX402Demo: () => void;
   executePaymentForm: typeof defaultExecutePaymentForm;
   executePolicyPayment: () => void;
   executeSignature: string | null;
@@ -1327,6 +1415,7 @@ function OperationsView({
   agentRegistryForm: { name: string; wallet: string };
   draftPolicyStatus: string;
   isAgentExecuting: boolean;
+  isX402Executing: boolean;
   onchainPolicyForm: typeof defaultOnchainPolicyForm;
   policy: typeof initialPolicy;
   policyAccountStatus: PolicyAccountStatus;
@@ -1355,6 +1444,9 @@ function OperationsView({
   togglePause: () => void;
   useRegisteredAgent: (agent: AgentRegistryEntry) => void;
   walletAddress: string | null;
+  x402ExplorerUrl: string | null;
+  x402Response: string | null;
+  x402Status: string;
   selectedProvisionedAgent: ProvisionedAgent | null;
   ownerAuthStatus: string;
   provisionedAgents: ProvisionedAgent[];
@@ -1400,28 +1492,28 @@ function OperationsView({
     <section className="grid workspace" style={{ marginTop: 16 }}>
       <div className="grid">
         <section className="panel">
-          <h2>How enforcement works</h2>
+          <h2>Active agent wallet</h2>
           <div className="setup-grid">
             <div className="event">
               <header>
-                <strong>Policy PDA</strong>
-                <WalletCards size={16} color="var(--blue)" />
+                <strong>Owner wallet</strong>
+                <WalletCards size={16} color="var(--aw-accent)" />
               </header>
-              <p>Stores owner, agent, caps, counters, approval threshold, and allowlisted recipients.</p>
+              <p>{walletAddress ? shortAddress(walletAddress) : "Connect a wallet to own and publish agent policies."}</p>
             </div>
             <div className="event">
               <header>
-                <strong>Program-routed transfer</strong>
-                <CircleDollarSign size={16} color="var(--green)" />
+                <strong>Agent wallet</strong>
+                <CircleDollarSign size={16} color="var(--aw-ok)" />
               </header>
-              <p>The agent calls AgentSpend before SPL tokens move, so policy checks happen on-chain.</p>
+              <p>{selectedProvisionedAgent ? shortAddress(selectedProvisionedAgent.publicKey) : "Create or select the wallet your AI agent will use."}</p>
             </div>
             <div className="event">
               <header>
-                <strong>Audit proof</strong>
-                <Activity size={16} color="var(--cyan)" />
+                <strong>Policy status</strong>
+                <Activity size={16} color="var(--aw-info)" />
               </header>
-              <p>Approved and rejected actions are visible in the app, with devnet transaction links for successful payments.</p>
+              <p>{displayedPolicyPda ? policyStatusText : "Register and publish a policy before the agent can spend."}</p>
             </div>
           </div>
           <div className="setup-grid" style={{ marginTop: 14 }}>
@@ -1431,7 +1523,7 @@ function OperationsView({
                 <FlaskConical size={16} color="var(--cyan)" />
               </header>
               <p>
-                The agent needs devnet SOL for fees and AgentSpend test tokens for payments.
+                The agent needs devnet SOL for fees and AgentWallet test tokens for payments.
                 Get SOL manually, then mint test tokens here.
               </p>
               <p>
@@ -1488,11 +1580,11 @@ function OperationsView({
           </div>
         </section>
 
-        <section className="panel">
+        <section className="panel advanced-only">
           <h2>Devnet proof links</h2>
           <div className="proof-grid">
             <ProofLink
-              label="AgentSpend program"
+              label="AgentWallet program"
               value={onchainPolicyForm.programId}
               href={getExplorerAddressUrl(onchainPolicyForm.programId)}
             />
@@ -1515,13 +1607,14 @@ function OperationsView({
         </section>
 
         <section className="panel span-2">
-          <h2>Production agent setup</h2>
+          <h2>Agent wallets</h2>
           <p className="section-note">
-            Self-serve path for judges: sign as owner, generate a hosted devnet agent wallet, initialize its policy, then link Telegram without editing backend env.
+            Generate hosted devnet wallets for AI agents. AgentWallet keeps signing keys encrypted server-side and routes every spend through the owner policy.
           </p>
           <div className="policy-form">
             <EditableField
               label="New agent name"
+              help="Give this hosted wallet a name, like Research Agent or Trading Agent."
               value={newAgentName}
               onChange={setNewAgentName}
             />
@@ -1534,7 +1627,19 @@ function OperationsView({
             <button className="button secondary" type="button" onClick={signInOwnerWallet}>
               <WalletCards size={17} /> Sign in with wallet
             </button>
-            <button className="button" type="button" onClick={createHostedAgent} disabled={!walletAddress}>
+            <button
+              className="button"
+              type="button"
+              onClick={createHostedAgent}
+              disabled={!walletAddress || !newAgentName.trim()}
+              title={
+                !walletAddress
+                  ? "Connect and sign with the owner wallet first."
+                  : !newAgentName.trim()
+                    ? "Enter an agent name first."
+                    : "Generate a hosted wallet and API key for this agent."
+              }
+            >
               <Plus size={17} /> Generate hosted agent
             </button>
           </div>
@@ -1542,7 +1647,7 @@ function OperationsView({
             <div className="devnet-card" style={{ marginTop: 14 }}>
               <span>One-time agent API key</span>
               <strong>{latestProvisionedApiKey}</strong>
-              <p>Copy this now. AgentSpend stores only the hash and will not show the full key again.</p>
+              <p>Copy this now. AgentWallet stores only the hash and will not show the full key again.</p>
             </div>
           ) : null}
           {telegramLinkCode ? (
@@ -1613,9 +1718,52 @@ function OperationsView({
               </div>
             )}
           </div>
+          <div className="setup-grid advanced-only" style={{ marginTop: 14 }}>
+            <div className="event">
+              <header>
+                <strong>AgentWallet SDK</strong>
+                <KeyRound size={16} color="var(--cyan)" />
+              </header>
+              <p>Agents call the hosted wallet API with their API key. Private keys stay encrypted server-side.</p>
+              <pre className="code-panel">{`import { AgentWallet } from "@agentwallet/sdk";
+
+const wallet = new AgentWallet({
+  baseUrl: "${sdkBaseUrlExample}",
+  apiKey: "${agentApiKey || "<agent-api-key>"}"
+});
+
+await wallet.pay({
+  recipient: "${executePaymentForm.recipient || "<recipient-public-key>"}",
+  amount: "${executePaymentForm.amount}",
+  tokenMint: "${onchainPolicyForm.tokenMint}"
+});`}</pre>
+            </div>
+            <div className="event">
+              <header>
+                <strong>x402 paid API demo</strong>
+                <CircleDollarSign size={16} color="var(--green)" />
+              </header>
+              <p>{x402Status}</p>
+              <p>Merchant wallet is returned by the paid API challenge.</p>
+              <p>
+                Price <strong>1 AgentWallet devnet test token</strong>
+              </p>
+              {x402ExplorerUrl ? (
+                <a className="explorer-link" href={x402ExplorerUrl} target="_blank" rel="noreferrer">
+                  <ExternalLink size={15} /> View x402 settlement
+                </a>
+              ) : null}
+              {x402Response ? <pre className="code-panel">{x402Response}</pre> : null}
+              <div className="button-row" style={{ marginTop: 12 }}>
+                <button className="button" type="button" onClick={runX402Demo} disabled={isX402Executing}>
+                  <CircleDollarSign size={17} /> {isX402Executing ? "Calling paid API..." : "Call paid API with agent"}
+                </button>
+              </div>
+            </div>
+          </div>
         </section>
 
-        <section className="panel">
+        <section className="panel advanced-only">
           <h2>Judge devnet setup</h2>
           <div className="setup-grid">
             <div className="event">
@@ -1652,7 +1800,7 @@ function OperationsView({
                 <strong>3. Run policy-gated payment</strong>
                 <CircleDollarSign size={16} color="var(--green)" />
               </header>
-              <p>Initialize the policy, then execute through AgentSpend so the program checks caps and allowlists before transfer.</p>
+              <p>Initialize the policy, then execute through AgentWallet so the program checks caps and allowlists before transfer.</p>
             </div>
           </div>
           <div className="button-row" style={{ marginTop: 14 }}>
@@ -1663,7 +1811,7 @@ function OperationsView({
         </section>
 
         <section className="panel" id="policy">
-          <h2>Owner-managed policy</h2>
+          <h2>Policy rules</h2>
           <div className="policy-form">
             <ReadOnlyField
               label="Your wallet"
@@ -1692,8 +1840,8 @@ function OperationsView({
               }
             />
             <EditableField
-              label="Require approval above ($)"
-              help="Payments above this amount need an owner-approved payment intent before execution."
+              label="Block autonomous spend above ($)"
+              help="Payments above this amount cannot execute automatically yet. Owner approval workflow is next; today the on-chain policy blocks them."
               value={policyForm.approvalThresholdUsd}
               onChange={(value) =>
                 setPolicyForm((current) => ({ ...current, approvalThresholdUsd: value }))
@@ -1745,10 +1893,10 @@ function OperationsView({
           </p>
         </section>
 
-        <section className="panel">
+        <section className="panel advanced-only">
           <h2>Agent registry</h2>
           <p className="section-note">
-            Register each AI agent wallet separately. Every agent gets its own policy account under the shared AgentSpend program.
+            Register each AI agent wallet separately. Every agent gets its own policy account under the shared AgentWallet program.
           </p>
           <div className="policy-form">
             <EditableField
@@ -1840,10 +1988,10 @@ function OperationsView({
         </section>
 
         <section className="panel">
-          <h2>Anchor policy account</h2>
+          <h2>Publish policy</h2>
           <div className="policy-form">
             <ReadOnlyField
-              label="AgentSpend program"
+              label="AgentWallet program"
               help="The deployed devnet program that enforces policy before token transfers."
               value={onchainPolicyForm.programId}
               className="span-2"
@@ -1956,7 +2104,7 @@ function OperationsView({
         </section>
 
         <section className="panel" id="agent-chat">
-          <h2>AI agent chat</h2>
+          <h2>Run agent action</h2>
           <div className="agent-chat">
             <div className="chat-messages" aria-live="polite">
               {agentMessages.map((message) => (
@@ -2016,14 +2164,14 @@ function OperationsView({
           </div>
         </section>
 
-        <section className="panel">
+        <section className="panel advanced-only">
           <h2>Agent API integration</h2>
           <div className="devnet-card">
             <p>
               A Telegram bot or backend agent calls this HTTP route after it turns an owner command into a payment intent. The server signs with the configured agent wallet, then submits the same on-chain `execute_payment` instruction used above.
             </p>
-            <pre className="code-panel">{`POST /api/agent/payments/execute
-Authorization: Bearer $AGENTSPEND_AGENT_API_KEY
+            <pre className="code-panel">{`POST /api/agent-wallet/pay
+Authorization: Bearer <agent-api-key>
 Content-Type: application/json
 
 {
@@ -2037,7 +2185,7 @@ Content-Type: application/json
           </div>
         </section>
 
-        <section className="panel">
+        <section className="panel advanced-only">
           <h2>Manual payment test</h2>
           <p className="section-note">
             Demo fallback: use this when you want Phantom to sign the agent payment manually. The normal agent workflow is AI Agent Chat or Telegram calling the backend executor.
@@ -2045,7 +2193,7 @@ Content-Type: application/json
           <div className="policy-form">
             <ReadOnlyField
               label="Policy account"
-              help="The on-chain policy PDA that AgentSpend checks before allowing payment."
+              help="The on-chain policy PDA that AgentWallet checks before allowing payment."
               value={displayedPolicyPda ?? "Initialize policy first"}
             />
             <ReadOnlyField
@@ -2072,7 +2220,7 @@ Content-Type: application/json
             />
             <EditableField
               label="Token decimals"
-              help="Decimals for the selected SPL token. AgentSpend Test Token uses 6."
+              help="Decimals for the selected SPL token mint."
               value={executePaymentForm.decimals}
               onChange={(value) =>
                 setExecutePaymentForm((current) => ({ ...current, decimals: value }))
@@ -2186,6 +2334,36 @@ function AuditTimeline({ events }: { events: SpendEvent[] }) {
   );
 }
 
+function AgentWalletMark() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <circle cx="8" cy="8" r="3" fill="#B8C4CC" opacity="0.9" />
+      <circle cx="8" cy="8" r="6.5" stroke="#B8C4CC" strokeWidth="0.8" strokeOpacity="0.3" />
+      <line x1="8" y1="1.5" x2="8" y2="4.5" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
+      <line x1="8" y1="11.5" x2="8" y2="14.5" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
+      <line x1="1.5" y1="8" x2="4.5" y2="8" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
+      <line x1="11.5" y1="8" x2="14.5" y2="8" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
+    </svg>
+  );
+}
+
+function auditEventToSpendEvent(event: AgentWalletAuditEvent): SpendEvent {
+  return {
+    id: event.id,
+    policyId: "agentwallet",
+    paymentId: event.type,
+    decision: event.status === "rejected" ? "denied" : "approved",
+    amountUsd: 0,
+    vendorName: event.type.replaceAll("_", " "),
+    category: "agentwallet",
+    createdAt: event.createdAt,
+    reasons: [
+      event.message,
+      event.signature ? `Signature: ${event.signature}.` : ""
+    ].filter(Boolean)
+  };
+}
+
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="metric">
@@ -2254,21 +2432,23 @@ function PresetEditableField({
     <div className={`field preset-field ${className ?? ""}`}>
       <FieldLabel label={label} help={help} />
       <div className="preset-control">
-        <select
-          defaultValue=""
-          aria-label={`Add preset for ${label}`}
-          onChange={(event) => {
-            appendCsvValue(value, event.target.value, onChange);
-            event.currentTarget.value = "";
-          }}
-        >
-          <option value="">Add existing option...</option>
-          {options.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+        {options.length ? (
+          <select
+            defaultValue=""
+            aria-label={`Add preset for ${label}`}
+            onChange={(event) => {
+              appendCsvValue(value, event.target.value, onChange);
+              event.currentTarget.value = "";
+            }}
+          >
+            <option value="">Add existing option...</option>
+            {options.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <input value={value} onChange={(event) => onChange(event.target.value)} />
       </div>
     </div>
@@ -2294,22 +2474,24 @@ function SelectEditableField({
     <div className={`field preset-field ${className ?? ""}`}>
       <FieldLabel label={label} help={help} />
       <div className="preset-control">
-        <select
-          value={options.some((option) => option.value === value) ? value : ""}
-          aria-label={`Choose preset for ${label}`}
-          onChange={(event) => {
-            if (event.target.value) {
-              onChange(event.target.value);
-            }
-          }}
-        >
-          <option value="">Custom token mint</option>
-          {options.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+        {options.length ? (
+          <select
+            value={options.some((option) => option.value === value) ? value : ""}
+            aria-label={`Choose preset for ${label}`}
+            onChange={(event) => {
+              if (event.target.value) {
+                onChange(event.target.value);
+              }
+            }}
+          >
+            <option value="">Custom token mint</option>
+            {options.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        ) : null}
         <input value={value} onChange={(event) => onChange(event.target.value)} />
       </div>
     </div>
@@ -2736,5 +2918,12 @@ function isAlreadyInitializedError(message: string) {
 }
 
 function shortAddress(address: string) {
+  if (address.length <= 12) {
+    return address;
+  }
   return `${address.slice(0, 4)}...${address.slice(-4)}`;
+}
+
+function formatUsdMetric(value: number) {
+  return value > 0 ? `$${value}` : "Not set";
 }
