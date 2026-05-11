@@ -148,6 +148,20 @@ const memoryStore: ProvisioningStore = {
   },
   async linkTelegramChat(agentId, chatId) {
     const agent = requireAgent(memory.agents.get(agentId), agentId);
+    const previousAgentId = memory.telegramChats.get(chatId);
+    if (previousAgentId && previousAgentId !== agentId) {
+      const previousAgent = memory.agents.get(previousAgentId);
+      if (previousAgent) {
+        memory.agents.set(previousAgentId, {
+          ...previousAgent,
+          telegramChatId: null,
+          updatedAt: new Date().toISOString()
+        });
+      }
+    }
+    if (agent.telegramChatId && agent.telegramChatId !== chatId) {
+      memory.telegramChats.delete(agent.telegramChatId);
+    }
     const updated = { ...agent, telegramChatId: chatId, updatedAt: new Date().toISOString() };
     memory.agents.set(agentId, updated);
     memory.telegramChats.set(chatId, agentId);
@@ -236,9 +250,24 @@ const redisStore: ProvisioningStore = {
   },
   async linkTelegramChat(agentId, chatId) {
     const agent = requireAgent(await this.getAgent(agentId), agentId);
+    const client = getRedis();
+    const previousAgentId = await client.get<string>(telegramChatKey(chatId));
+    if (previousAgentId && previousAgentId !== agentId) {
+      const previousAgent = await this.getAgent(previousAgentId);
+      if (previousAgent) {
+        await client.set(agentKey(previousAgentId), {
+          ...previousAgent,
+          telegramChatId: null,
+          updatedAt: new Date().toISOString()
+        });
+      }
+    }
+    if (agent.telegramChatId && agent.telegramChatId !== chatId) {
+      await client.del(telegramChatKey(agent.telegramChatId));
+    }
     const updated = { ...agent, telegramChatId: chatId, updatedAt: new Date().toISOString() };
     await this.saveAgent(updated);
-    await getRedis().set(telegramChatKey(chatId), agentId);
+    await client.set(telegramChatKey(chatId), agentId);
     return updated;
   },
   async unlinkTelegramChat(agentId) {

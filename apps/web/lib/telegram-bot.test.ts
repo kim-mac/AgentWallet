@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildTelegramPaymentInput,
   formatTelegramFailure,
+  formatTelegramHelp,
   formatTelegramSuccess,
   getTelegramMessage
 } from "./telegram-bot";
@@ -34,6 +35,22 @@ describe("telegram bot helpers", () => {
       recipient: "ELCt5nsW3HNBesvuynh94VnmKZosrUcncuEP89XDJFDH",
       decimals: 6
     });
+  });
+
+  it("requires a configured token mint before building payment input", () => {
+    expect(() =>
+      buildTelegramPaymentInput(text, {
+        policyPda: "PolicyPda111111111111111111111111111111111",
+        tokenMint: "",
+        decimals: 6,
+        programId: "Program1111111111111111111111111111111111"
+      })
+    ).toThrow("Token mint is not configured");
+  });
+
+  it("uses AgentWallet product language in help text", () => {
+    expect(formatTelegramHelp()).toContain("AgentWallet");
+    expect(formatTelegramHelp()).not.toContain("AgentSpend");
   });
 
   it("formats successful Telegram replies with explorer proof", () => {

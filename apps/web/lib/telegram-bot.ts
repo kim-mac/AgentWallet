@@ -1,7 +1,4 @@
-import {
-  defaultAgentSpendProgramId,
-  defaultDevnetUsdcMint
-} from "./solana-devnet";
+import { defaultAgentSpendProgramId } from "./solana-devnet";
 import { parseAgentCommand } from "./agent-command";
 import type { ExecutePaymentInput } from "./agent-executor";
 
@@ -36,12 +33,17 @@ export function buildTelegramPaymentInput(
   config: TelegramPaymentConfig
 ): ExecutePaymentInput {
   const parsed = parseAgentCommand(command);
+  const tokenMint = config.tokenMint?.trim();
+
+  if (!tokenMint) {
+    throw new Error("Token mint is not configured for this AgentWallet agent. Set a token mint in the dashboard, update the hosted agent, and publish the policy first.");
+  }
 
   return {
     programId: config.programId ?? defaultAgentSpendProgramId,
     policyPda: config.policyPda,
     recipient: parsed.recipient,
-    tokenMint: config.tokenMint ?? defaultDevnetUsdcMint,
+    tokenMint,
     amount: parsed.amount,
     decimals: config.decimals ?? 6
   };
@@ -84,7 +86,7 @@ export function formatTelegramHelp() {
     "Try:",
     "send 1 token to <recipient-wallet>",
     "",
-    "I will route the payment through the on-chain policy before tokens move."
+    "I will route the payment through the AgentWallet policy before tokens move."
   ].join("\n");
 }
 

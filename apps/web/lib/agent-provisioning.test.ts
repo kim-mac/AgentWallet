@@ -50,4 +50,17 @@ describe("agent provisioning", () => {
     await unlinkTelegram(owner, agent.id);
     expect(await getProvisioningStore().getAgentByTelegramChat("12345")).toBeNull();
   });
+
+  it("moves a Telegram chat from the old agent when relinked", async () => {
+    const first = await createProvisionedAgent(owner, { name: "First agent" });
+    const second = await createProvisionedAgent(owner, { name: "Second agent" });
+    const store = getProvisioningStore();
+
+    await store.linkTelegramChat(first.agent.id, "chat-1");
+    await store.linkTelegramChat(second.agent.id, "chat-1");
+
+    expect((await store.getAgent(first.agent.id))?.telegramChatId).toBeNull();
+    expect((await store.getAgent(second.agent.id))?.telegramChatId).toBe("chat-1");
+    expect((await store.getAgentByTelegramChat("chat-1"))?.id).toBe(second.agent.id);
+  });
 });

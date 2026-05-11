@@ -220,21 +220,21 @@ TELEGRAM_BOT_TOKEN=<bot-token-from-BotFather>
 TELEGRAM_WEBHOOK_SECRET=<random-secret>
 ```
 
-For a local demo, expose the app with a tunnel:
-
-```bash
-ngrok http 3000
-```
-
-Then register the webhook:
+Register the production webhook after Vercel deploys:
 
 ```bash
 curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://<your-ngrok-domain>/api/webhooks/telegram",
+    "url": "https://<your-vercel-domain>/api/webhooks/telegram",
     "secret_token": "'"$TELEGRAM_WEBHOOK_SECRET"'"
   }'
+```
+
+For a local demo, expose the app with a tunnel and use the tunnel URL instead:
+
+```bash
+ngrok http 3000
 ```
 
 In the dashboard, click **Link** on a hosted agent and send the shown code to

@@ -52,14 +52,14 @@ export async function POST(request: Request) {
       const agent = await getProvisioningStore().getAgentByTelegramChat(String(message.chatId));
       if (!agent) {
         throw new TelegramWebhookError(
-          "This Telegram chat is not linked yet. Open AgentSpend, create a Telegram link code, then send /link CODE here.",
+          "This Telegram chat is not linked yet. Open AgentWallet, create a Telegram link code, then send /link CODE here.",
           400
         );
       }
 
       if (!agent.policyPda) {
         throw new TelegramWebhookError(
-          "This agent does not have a policy PDA yet. Initialize or update the policy in AgentSpend first.",
+          "This agent does not have a policy PDA yet. Initialize or update the policy in AgentWallet first.",
           400
         );
       }
@@ -105,14 +105,14 @@ async function handleTelegramLink(botToken: string, chatId: number | string, tex
   const code = text.trim().split(/\s+/)[1]?.toUpperCase();
 
   if (!code) {
-    await sendTelegramMessage(botToken, chatId, "Send /link CODE from your AgentSpend dashboard.");
+    await sendTelegramMessage(botToken, chatId, "Send /link CODE from your AgentWallet dashboard.");
     return;
   }
 
   const link = await getProvisioningStore().consumeTelegramLink(code);
 
   if (!link || Date.now() > new Date(link.expiresAt).getTime()) {
-    await sendTelegramMessage(botToken, chatId, "That link code is invalid or expired. Create a new one in AgentSpend.");
+    await sendTelegramMessage(botToken, chatId, "That link code is invalid or expired. Create a new one in AgentWallet.");
     return;
   }
 
@@ -128,7 +128,7 @@ async function handleTelegramUnlink(botToken: string, chatId: number | string) {
   const agent = await getProvisioningStore().getAgentByTelegramChat(String(chatId));
 
   if (!agent) {
-    await sendTelegramMessage(botToken, chatId, "This Telegram chat is not linked to an AgentSpend agent.");
+    await sendTelegramMessage(botToken, chatId, "This Telegram chat is not linked to an AgentWallet agent.");
     return;
   }
 
@@ -140,7 +140,7 @@ async function handleTelegramAgent(botToken: string, chatId: number | string) {
   const agent = await getProvisioningStore().getAgentByTelegramChat(String(chatId));
 
   if (!agent) {
-    await sendTelegramMessage(botToken, chatId, "No AgentSpend agent is linked. Send /link CODE first.");
+    await sendTelegramMessage(botToken, chatId, "No AgentWallet agent is linked. Send /link CODE first.");
     return;
   }
 
