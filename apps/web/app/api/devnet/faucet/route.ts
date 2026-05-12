@@ -8,10 +8,10 @@ import { PublicKey } from "@solana/web3.js";
 import { z } from "zod";
 import {
   createDevnetConnection,
-  defaultDevnetUsdcMint,
   getExplorerTransactionUrl
 } from "../../../../lib/solana-devnet";
 import { loadKeypairFromEnv } from "../../../../lib/server-wallet";
+import { normalizeTokenMint } from "../../../../lib/faucet";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,7 +29,7 @@ export async function POST(request: Request) {
     const mintAuthority = loadKeypairFromEnv("AGENTSPEND_DEVNET_FAUCET_SECRET_KEY");
     const connection = createDevnetConnection();
     const owner = new PublicKey(body.owner);
-    const mint = new PublicKey(body.tokenMint ?? defaultDevnetUsdcMint);
+    const mint = new PublicKey(normalizeTokenMint(body.tokenMint));
     const tokenAccount = await getOrCreateAssociatedTokenAccount(
       connection,
       mintAuthority,

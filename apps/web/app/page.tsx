@@ -146,13 +146,19 @@ function PreviewStat({ label, value }: { label: string; value: string }) {
 
 function AgentWalletMark() {
   return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="3" fill="#B8C4CC" opacity="0.9" />
-      <circle cx="8" cy="8" r="6.5" stroke="#B8C4CC" strokeWidth="0.8" strokeOpacity="0.3" />
-      <line x1="8" y1="1.5" x2="8" y2="4.5" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
-      <line x1="8" y1="11.5" x2="8" y2="14.5" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
-      <line x1="1.5" y1="8" x2="4.5" y2="8" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
-      <line x1="11.5" y1="8" x2="14.5" y2="8" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
+    <svg width="21" height="21" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <path d="M17 21H20.5V18.5H27.5V21H29.5V14.5H34.5V21H36.5V14.5H41.5V21H48V43H45.5V46H18.5V43H16V21H17Z" fill="#7B8188" />
+      <path d="M19.5 26.5H44.5V40.5H19.5V26.5Z" fill="#111315" />
+      <path d="M24 23H27V26H24V23Z" fill="#111315" />
+      <path d="M30 23H33V26H30V23Z" fill="#111315" />
+      <path d="M36 23H39V26H36V23Z" fill="#111315" />
+      <path d="M26.5 31H30V38H26.5V31Z" fill="#E4E6E9" />
+      <path d="M36.5 31H40V38H36.5V31Z" fill="#E4E6E9" />
+      <path d="M8.5 32H12.5V29H16V34.5H12.5V38H8.5V32Z" fill="#5A5E66" />
+      <path d="M55.5 32H51.5V29H48V34.5H51.5V38H55.5V32Z" fill="#5A5E66" />
+      <path d="M24 49H30.5V52H24V49Z" fill="#5A5E66" />
+      <path d="M37 49H43.5V52H37V49Z" fill="#5A5E66" />
+      <path d="M17 21H20.5V18.5H27.5V21H29.5V14.5H34.5V21H36.5V14.5H41.5V21H48V43H45.5V46H18.5V43H16V21H17Z" stroke="#B8C4CC" strokeOpacity="0.22" strokeWidth="1" />
     </svg>
   );
 }

@@ -46,18 +46,20 @@ import {
   getExplorerTransactionUrl,
   getPhantomProvider,
   parsePublicKey,
-  type PhantomProvider
+  type PhantomProvider,
+  defaultDevnetUsdcMint
 } from "../lib/solana-devnet";
 
 const storageKey = "agentwallet.dashboard-state.v2";
 const agentRegistryStorageKey = "agentspend.agent-registry.v1";
+const tokenCatalogStorageKey = "agentwallet.token-catalog.v1";
 const demoMerchantResourcePath = "/api/demo-merchant/resource";
 const sdkBaseUrlExample = "https://your-agentwallet.vercel.app";
 
 const defaultOnchainPolicyForm = {
   programId: defaultAgentSpendProgramId,
   agent: "",
-  tokenMint: "",
+  tokenMint: defaultDevnetUsdcMint,
   allowedRecipients: "",
   periodSeconds: ""
 };
@@ -70,8 +72,6 @@ const defaultExecutePaymentForm = {
 
 const vendorPresets: Array<{ label: string; value: string }> = [];
 const categoryPresets: Array<{ label: string; value: string }> = [];
-const tokenMintPresets: Array<{ label: string; value: string }> = [];
-
 type CatalogItem = {
   id: string;
   label: string;
@@ -81,6 +81,14 @@ type CatalogItem = {
 
 const defaultProductCatalog: CatalogItem[] = [];
 const defaultRecipientCatalog: CatalogItem[] = [];
+const defaultTokenCatalog: CatalogItem[] = [
+  {
+    id: "agentwallet-devnet-token",
+    label: "AgentWallet devnet test token",
+    value: defaultDevnetUsdcMint,
+    selected: true
+  }
+];
 
 type DashboardView = "operations" | "simulator" | "audit";
 
@@ -144,6 +152,9 @@ export default function Dashboard() {
   );
   const [recipientCatalog, setRecipientCatalog] = useState<CatalogItem[]>(
     syncCatalogSelection(defaultRecipientCatalog, defaultOnchainPolicyForm.allowedRecipients)
+  );
+  const [tokenCatalog, setTokenCatalog] = useState<CatalogItem[]>(
+    syncCatalogSelection(defaultTokenCatalog, defaultOnchainPolicyForm.tokenMint)
   );
   const [agentRegistry, setAgentRegistry] =
     useState<AgentRegistryEntry[]>(defaultAgentRegistry);
@@ -242,6 +253,10 @@ export default function Dashboard() {
     const savedAgentRegistry = parseAgentRegistry(
       window.localStorage.getItem(agentRegistryStorageKey)
     );
+    const savedTokenCatalog = parseCatalogItems(
+      window.localStorage.getItem(tokenCatalogStorageKey),
+      defaultTokenCatalog
+    );
 
     if (snapshot) {
       setPolicy(snapshot.policy);
@@ -255,6 +270,10 @@ export default function Dashboard() {
 
     if (savedAgentRegistry) {
       setAgentRegistry(savedAgentRegistry);
+    }
+
+    if (savedTokenCatalog) {
+      setTokenCatalog(savedTokenCatalog);
     }
 
     setHasLoadedSnapshot(true);
@@ -275,6 +294,14 @@ export default function Dashboard() {
 
     window.localStorage.setItem(agentRegistryStorageKey, JSON.stringify(agentRegistry));
   }, [agentRegistry, hasLoadedSnapshot]);
+
+  useEffect(() => {
+    if (!hasLoadedSnapshot) {
+      return;
+    }
+
+    window.localStorage.setItem(tokenCatalogStorageKey, JSON.stringify(tokenCatalog));
+  }, [hasLoadedSnapshot, tokenCatalog]);
 
   useEffect(() => {
     const allowedProducts = activeCatalogValues(productCatalog).join(", ");
@@ -298,6 +325,17 @@ export default function Dashboard() {
         : { ...current, allowedRecipients: allowedRecipients }
     );
   }, [recipientCatalog]);
+
+  useEffect(() => {
+    const selectedTokens = activeCatalogValues(tokenCatalog);
+    const nextTokenMint = selectedTokens.includes(onchainPolicyForm.tokenMint)
+      ? onchainPolicyForm.tokenMint
+      : selectedTokens[0] ?? "";
+
+    if (nextTokenMint !== onchainPolicyForm.tokenMint) {
+      setOnchainPolicyForm((current) => ({ ...current, tokenMint: nextTokenMint }));
+    }
+  }, [onchainPolicyForm.tokenMint, tokenCatalog]);
 
   useEffect(() => {
     if (!activeDerivedPolicyPda) {
@@ -521,6 +559,10 @@ export default function Dashboard() {
     }
 
     const tokenMint = onchainPolicyForm.tokenMint.trim();
+    if (!tokenMint) {
+      setOwnerAuthStatus("Select at least one token mint before generating a hosted agent.");
+      return;
+    }
 
     try {
       setOwnerAuthStatus("Creating hosted agent wallet and API key...");
@@ -607,6 +649,11 @@ export default function Dashboard() {
       agent: agent.publicKey,
       tokenMint: agent.tokenMint
     }));
+    if (agent.tokenMint) {
+      setTokenCatalog((current) =>
+        addCatalogItem(current, labelForTokenMint(agent.tokenMint), agent.tokenMint, true)
+      );
+    }
     setPolicyPda(agent.policyPda);
     setPolicyAccountStatus(agent.policyPda ? "checking" : "idle");
     setAnchorStatus(
@@ -986,7 +1033,7 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           owner,
-          tokenMint: onchainPolicyForm.tokenMint,
+          tokenMint: onchainPolicyForm.tokenMint || defaultDevnetUsdcMint,
           amount: 25,
           decimals: Number(executePaymentForm.decimals) || 6
         })
@@ -1017,18 +1064,26 @@ export default function Dashboard() {
     }
 
     try {
+      const tokenMint =
+        selectedProvisionedAgent.tokenMint.trim() ||
+        onchainPolicyForm.tokenMint.trim() ||
+        defaultDevnetUsdcMint;
+      const decimals = Number(selectedProvisionedAgent.decimals) || Number(executePaymentForm.decimals) || 6;
+
       setAgentFaucetTokenAccount(null);
       setAgentFaucetSignature(null);
-      setAgentFaucetStatus(`Minting AgentWallet test tokens to ${shortAddress(selectedProvisionedAgent.publicKey)}...`);
+      setAgentFaucetStatus(
+        `Minting AgentWallet test tokens to ${shortAddress(selectedProvisionedAgent.publicKey)}...`
+      );
 
       const result = await fetch("/api/devnet/faucet", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           owner: selectedProvisionedAgent.publicKey,
-          tokenMint: selectedProvisionedAgent.tokenMint,
+          tokenMint,
           amount: 25,
-          decimals: selectedProvisionedAgent.decimals
+          decimals
         })
       });
       const payload = (await result.json()) as {
@@ -1204,10 +1259,12 @@ export default function Dashboard() {
 
   function resetDemo() {
     window.localStorage.removeItem(storageKey);
+    window.localStorage.removeItem(tokenCatalogStorageKey);
     setPolicy(initialPolicy);
     setPolicyForm(policyToFormValues(initialPolicy));
     setProductCatalog(syncCatalogSelection(defaultProductCatalog, initialPolicy.allowedVendors.join(", ")));
     setRecipientCatalog(syncCatalogSelection(defaultRecipientCatalog, defaultOnchainPolicyForm.allowedRecipients));
+    setTokenCatalog(syncCatalogSelection(defaultTokenCatalog, defaultOnchainPolicyForm.tokenMint));
     setAgentRegistry(defaultAgentRegistry);
     setAgentRegistryForm({ name: "", wallet: "" });
     setSelectedAgentId(null);
@@ -1343,6 +1400,7 @@ export default function Dashboard() {
             productCatalog={productCatalog}
             registryRows={registryRows}
             recipientCatalog={recipientCatalog}
+            tokenCatalog={tokenCatalog}
             recipientTokenAccount={recipientTokenAccount}
             requestDevnetTokens={requestDevnetTokens}
             requestSelectedAgentTokens={requestSelectedAgentTokens}
@@ -1357,6 +1415,7 @@ export default function Dashboard() {
             setPolicyForm={setPolicyForm}
             setProductCatalog={setProductCatalog}
             setRecipientCatalog={setRecipientCatalog}
+            setTokenCatalog={setTokenCatalog}
             selectedAgentId={selectedAgentId}
             submitAnchorPolicyInstruction={submitAnchorPolicyInstruction}
             submitAgentCommand={submitAgentCommand}
@@ -1426,6 +1485,7 @@ function OperationsView({
   productCatalog,
   registryRows,
   recipientCatalog,
+  tokenCatalog,
   recipientTokenAccount,
   requestDevnetTokens,
   requestSelectedAgentTokens,
@@ -1440,6 +1500,7 @@ function OperationsView({
   setPolicyForm,
   setProductCatalog,
   setRecipientCatalog,
+  setTokenCatalog,
   selectedAgentId,
   submitAnchorPolicyInstruction,
   submitAgentCommand,
@@ -1498,6 +1559,7 @@ function OperationsView({
   productCatalog: CatalogItem[];
   registryRows: Array<AgentRegistryEntry & { derivedPolicyPda: string | null }>;
   recipientCatalog: CatalogItem[];
+  tokenCatalog: CatalogItem[];
   recipientTokenAccount: string | null;
   requestDevnetTokens: () => void;
   requestSelectedAgentTokens: () => void;
@@ -1512,6 +1574,7 @@ function OperationsView({
   setPolicyForm: Dispatch<SetStateAction<PolicyFormValues>>;
   setProductCatalog: Dispatch<SetStateAction<CatalogItem[]>>;
   setRecipientCatalog: Dispatch<SetStateAction<CatalogItem[]>>;
+  setTokenCatalog: Dispatch<SetStateAction<CatalogItem[]>>;
   selectedAgentId: string | null;
   submitAnchorPolicyInstruction: (action: "initialize" | "update" | "pause" | "resume") => void;
   submitAgentCommand: () => void;
@@ -1597,7 +1660,7 @@ function OperationsView({
                 <FlaskConical size={16} color="var(--cyan)" />
               </header>
               <p>
-                Fund with devnet SOL first, then mint AgentWallet test tokens for payments.
+                Fund with devnet SOL first, then mint AgentWallet test tokens for payments. Custom token mints must be funded from their own devnet mint authority.
               </p>
               <p className="inline-status warning compact-status">
                 <AlertTriangle size={15} /> SOL is required before token minting.
@@ -2083,15 +2146,16 @@ await wallet.pay({
                 setOnchainPolicyForm((current) => ({ ...current, agent: value }))
               }
             />
-            <SelectEditableField
-              label="Token the agent can spend"
-              help="Choose the SPL token mint the policy allows. The agent must hold this token."
-              value={onchainPolicyForm.tokenMint}
-              options={tokenMintPresets}
+            <TokenCatalogField
+              label="Tokens the agent can spend"
+              help="Add Solana devnet SPL token names and mint/contract addresses. Checked tokens are saved for this agent; the active token is used when publishing policy and running payment tests."
+              activeValue={onchainPolicyForm.tokenMint}
+              items={tokenCatalog}
               className="span-2"
-              onChange={(value) =>
+              onActiveChange={(value) =>
                 setOnchainPolicyForm((current) => ({ ...current, tokenMint: value }))
               }
+              onChange={setTokenCatalog}
             />
             <ChecklistCatalogField
               label="Allowed recipient wallets"
@@ -2511,13 +2575,19 @@ function AuditTimeline({ events }: { events: SpendEvent[] }) {
 
 function AgentWalletMark() {
   return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="3" fill="#B8C4CC" opacity="0.9" />
-      <circle cx="8" cy="8" r="6.5" stroke="#B8C4CC" strokeWidth="0.8" strokeOpacity="0.3" />
-      <line x1="8" y1="1.5" x2="8" y2="4.5" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
-      <line x1="8" y1="11.5" x2="8" y2="14.5" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
-      <line x1="1.5" y1="8" x2="4.5" y2="8" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
-      <line x1="11.5" y1="8" x2="14.5" y2="8" stroke="#B8C4CC" strokeWidth="1" strokeLinecap="round" strokeOpacity="0.5" />
+    <svg width="21" height="21" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <path d="M17 21H20.5V18.5H27.5V21H29.5V14.5H34.5V21H36.5V14.5H41.5V21H48V43H45.5V46H18.5V43H16V21H17Z" fill="#7B8188" />
+      <path d="M19.5 26.5H44.5V40.5H19.5V26.5Z" fill="#111315" />
+      <path d="M24 23H27V26H24V23Z" fill="#111315" />
+      <path d="M30 23H33V26H30V23Z" fill="#111315" />
+      <path d="M36 23H39V26H36V23Z" fill="#111315" />
+      <path d="M26.5 31H30V38H26.5V31Z" fill="#E4E6E9" />
+      <path d="M36.5 31H40V38H36.5V31Z" fill="#E4E6E9" />
+      <path d="M8.5 32H12.5V29H16V34.5H12.5V38H8.5V32Z" fill="#5A5E66" />
+      <path d="M55.5 32H51.5V29H48V34.5H51.5V38H55.5V32Z" fill="#5A5E66" />
+      <path d="M24 49H30.5V52H24V49Z" fill="#5A5E66" />
+      <path d="M37 49H43.5V52H37V49Z" fill="#5A5E66" />
+      <path d="M17 21H20.5V18.5H27.5V21H29.5V14.5H34.5V21H36.5V14.5H41.5V21H48V43H45.5V46H18.5V43H16V21H17Z" stroke="#B8C4CC" strokeOpacity="0.22" strokeWidth="1" />
     </svg>
   );
 }
@@ -2668,6 +2738,146 @@ function SelectEditableField({
           </select>
         ) : null}
         <input value={value} onChange={(event) => onChange(event.target.value)} />
+      </div>
+    </div>
+  );
+}
+
+function TokenCatalogField({
+  label,
+  items,
+  activeValue,
+  onActiveChange,
+  onChange,
+  help,
+  className
+}: {
+  label: string;
+  items: CatalogItem[];
+  activeValue: string;
+  onActiveChange: (value: string) => void;
+  onChange: Dispatch<SetStateAction<CatalogItem[]>>;
+  help?: string;
+  className?: string;
+}) {
+  const [draftLabel, setDraftLabel] = useState("");
+  const [draftValue, setDraftValue] = useState("");
+  const selectedItems = items.filter((item) => item.selected);
+
+  function addToken() {
+    const value = draftValue.trim();
+    const nextLabel = draftLabel.trim() || labelForTokenMint(value);
+
+    if (!value) {
+      return;
+    }
+
+    onChange((current) => addCatalogItem(current, nextLabel, value, true));
+    onActiveChange(value);
+    setDraftLabel("");
+    setDraftValue("");
+  }
+
+  function toggleToken(item: CatalogItem, selected: boolean) {
+    const remainingSelected = items.filter(
+      (candidate) => candidate.id !== item.id && candidate.selected
+    );
+
+    onChange((current) =>
+      current.map((candidate) =>
+        candidate.id === item.id ? { ...candidate, selected } : candidate
+      )
+    );
+
+    if (selected) {
+      onActiveChange(item.value);
+      return;
+    }
+
+    if (activeValue === item.value) {
+      onActiveChange(remainingSelected[0]?.value ?? "");
+    }
+  }
+
+  return (
+    <div className={`field checklist-field ${className ?? ""}`}>
+      <FieldLabel label={label} help={help} />
+      <div className="catalog-add-row">
+        <input
+          value={draftLabel}
+          placeholder="Token name"
+          onChange={(event) => setDraftLabel(event.target.value)}
+        />
+        <input
+          value={draftValue}
+          placeholder="SPL token mint / contract address"
+          onChange={(event) => setDraftValue(event.target.value)}
+        />
+        <button className="icon-button" type="button" aria-label={`Add ${label}`} onClick={addToken}>
+          <Plus size={16} />
+        </button>
+      </div>
+      <div className="checklist-card token-checklist">
+        {items.length ? (
+          items.map((item) => (
+            <label className="checklist-item" key={item.id}>
+              <input
+                type="checkbox"
+                checked={item.selected}
+                onChange={(event) => toggleToken(item, event.target.checked)}
+              />
+              <span>
+                <strong>{item.label}</strong>
+                <small>{item.value}</small>
+              </span>
+              <button
+                className="icon-button ghost"
+                type="button"
+                aria-label={`Remove ${item.label}`}
+                disabled={item.value === defaultDevnetUsdcMint}
+                title={
+                  item.value === defaultDevnetUsdcMint
+                    ? "The AgentWallet devnet test token stays available for demos."
+                    : `Remove ${item.label}`
+                }
+                onClick={(event) => {
+                  event.preventDefault();
+                  const nextSelected = items.filter(
+                    (candidate) => candidate.id !== item.id && candidate.selected
+                  );
+                  onChange((current) =>
+                    current.filter((candidate) => candidate.id !== item.id)
+                  );
+                  if (activeValue === item.value) {
+                    onActiveChange(nextSelected[0]?.value ?? "");
+                  }
+                }}
+              >
+                <X size={15} />
+              </button>
+            </label>
+          ))
+        ) : (
+          <p className="empty-note">No tokens saved yet. Add a devnet SPL token mint above.</p>
+        )}
+      </div>
+      <div className="token-active-row">
+        <FieldLabel
+          label="Active token for policy and tests"
+          help="The deployed devnet policy currently publishes one active token mint at a time. Pick any checked token here when you want to try another token."
+        />
+        <select
+          value={activeValue}
+          disabled={!selectedItems.length}
+          onChange={(event) => onActiveChange(event.target.value)}
+        >
+          {!selectedItems.length ? <option value="">No token selected</option> : null}
+          {selectedItems.map((item) => (
+            <option key={item.id} value={item.value}>
+              {item.label}
+            </option>
+          ))}
+        </select>
       </div>
     </div>
   );
@@ -2909,6 +3119,12 @@ function activeCatalogValues(items: CatalogItem[]): string[] {
   return items.filter((item) => item.selected).map((item) => item.value);
 }
 
+function labelForTokenMint(tokenMint: string): string {
+  return tokenMint === defaultDevnetUsdcMint
+    ? "AgentWallet devnet test token"
+    : shortAddress(tokenMint);
+}
+
 function addCatalogItem(
   items: CatalogItem[],
   label: string,
@@ -2959,6 +3175,47 @@ function syncCatalogSelection(defaultItems: CatalogItem[], csvValue: string): Ca
     }));
 
   return [...syncedDefaults, ...customItems];
+}
+
+function parseCatalogItems(value: string | null, fallback: CatalogItem[]): CatalogItem[] | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as CatalogItem[];
+
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+
+    const items = parsed
+      .filter(
+        (item) =>
+          typeof item.id === "string" &&
+          typeof item.label === "string" &&
+          typeof item.value === "string" &&
+          typeof item.selected === "boolean"
+      )
+      .map((item) => ({
+        ...item,
+        label: item.label.trim() || labelForTokenMint(item.value),
+        value: item.value.trim()
+      }))
+      .filter((item) => item.value);
+
+    const withFallbacks = fallback.reduce(
+      (current, item) =>
+        current.some((candidate) => candidate.value === item.value)
+          ? current
+          : [...current, item],
+      items
+    );
+
+    return withFallbacks.length ? withFallbacks : fallback;
+  } catch {
+    return null;
+  }
 }
 
 function parseCsvValues(value: string): string[] {

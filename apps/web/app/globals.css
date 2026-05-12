@@ -918,6 +918,11 @@ select {
   color: var(--aw-accent);
 }
 
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
 .icon-button.ghost {
   min-width: 32px;
   min-height: 32px;
@@ -929,6 +934,15 @@ select {
   max-height: 220px;
   overflow: auto;
   background: var(--aw-elevated);
+}
+
+.token-checklist {
+  max-height: 184px;
+}
+
+.token-active-row {
+  display: grid;
+  gap: 7px;
 }
 
 .checklist-item {

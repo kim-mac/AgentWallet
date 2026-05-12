@@ -1,15 +1,43 @@
 <svg width="2400" height="720" viewBox="0 0 2400 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>AgentWallet logo</title>
+  <defs>
+    <linearGradient id="logo-bg" x1="112" y1="128" x2="552" y2="568" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#202326"/>
+      <stop offset="1" stop-color="#111315"/>
+    </linearGradient>
+    <linearGradient id="logo-metal" x1="226" y1="220" x2="442" y2="434" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#70757B"/>
+      <stop offset="0.34" stop-color="#3D4146"/>
+      <stop offset="0.68" stop-color="#2A2D31"/>
+      <stop offset="1" stop-color="#5A5F65"/>
+    </linearGradient>
+    <linearGradient id="logo-eye" x1="292" y1="328" x2="292" y2="394" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#B8C4CC"/>
+    </linearGradient>
+    <filter id="logo-shadow" x="112" y="124" width="500" height="500" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#050607" flood-opacity="0.52"/>
+    </filter>
+  </defs>
   <rect width="2400" height="720" rx="72" fill="#1A1C1E"/>
-  <g transform="translate(112 140)">
-    <rect width="440" height="440" rx="96" fill="#222426"/>
-    <rect x="18" y="18" width="404" height="404" rx="78" stroke="#B8C4CC" stroke-opacity="0.16" stroke-width="3"/>
-    <circle cx="220" cy="220" r="65" fill="#B8C4CC" fill-opacity="0.92"/>
-    <circle cx="220" cy="220" r="143" stroke="#B8C4CC" stroke-opacity="0.32" stroke-width="16"/>
-    <path d="M220 48V122" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="22" stroke-linecap="round"/>
-    <path d="M220 318V392" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="22" stroke-linecap="round"/>
-    <path d="M48 220H122" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="22" stroke-linecap="round"/>
-    <path d="M318 220H392" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="22" stroke-linecap="round"/>
+  <g transform="translate(112 116)">
+    <rect width="488" height="488" rx="92" fill="url(#logo-bg)"/>
+    <rect x="16" y="16" width="456" height="456" rx="76" stroke="#B8C4CC" stroke-opacity="0.08" stroke-width="2"/>
+    <g filter="url(#logo-shadow)">
+      <path d="M140 164H166V148H218V164H232V128H246V164H262V128H276V164H328V148H354V164H372V334H354V350H142V334H124V164H140Z" fill="url(#logo-metal)"/>
+      <path d="M154 208H342V316H154V208Z" fill="#111315"/>
+      <path d="M184 180H198V194H184V180Z" fill="#111315"/>
+      <path d="M212 180H226V194H212V180Z" fill="#111315"/>
+      <path d="M240 180H254V194H240V180Z" fill="#111315"/>
+      <path d="M198 241H216V291H198V241Z" fill="url(#logo-eye)"/>
+      <path d="M280 241H298V291H280V241Z" fill="url(#logo-eye)"/>
+      <path d="M96 260H118V240H134V270H118V290H96V260Z" fill="url(#logo-metal)"/>
+      <path d="M400 260H378V240H362V270H378V290H400V260Z" fill="url(#logo-metal)"/>
+      <path d="M172 370H220V388H172V370Z" fill="url(#logo-metal)"/>
+      <path d="M276 370H324V388H276V370Z" fill="url(#logo-metal)"/>
+      <path d="M140 164H166V148H218V164H232V128H246V164H262V128H276V164H328V148H354V164H372V334H354V350H142V334H124V164H140Z" stroke="#B8C4CC" stroke-opacity="0.16"/>
+    </g>
   </g>
-  <text x="640" y="330" fill="#E4E6E9" font-family="Inter, Arial, sans-serif" font-size="150" font-weight="600" letter-spacing="-4">AgentWallet</text>
-  <text x="646" y="430" fill="#8B9099" font-family="JetBrains Mono, Consolas, monospace" font-size="44" letter-spacing="4">wallets for AI agents · policy-enforced</text>
+  <text x="676" y="330" fill="#E4E6E9" font-family="Inter, Arial, sans-serif" font-size="150" font-weight="600" letter-spacing="-4">AgentWallet</text>
+  <text x="684" y="430" fill="#8B9099" font-family="JetBrains Mono, Consolas, monospace" font-size="44" letter-spacing="4">wallets for AI agents · policy-enforced</text>
 </svg>

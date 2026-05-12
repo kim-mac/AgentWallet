@@ -1,10 +1,46 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="1024" height="1024" rx="220" fill="#222426"/>
-  <rect x="40" y="40" width="944" height="944" rx="180" stroke="#B8C4CC" stroke-opacity="0.16" stroke-width="4"/>
-  <circle cx="512" cy="512" r="152" fill="#B8C4CC" fill-opacity="0.92"/>
-  <circle cx="512" cy="512" r="332" stroke="#B8C4CC" stroke-opacity="0.32" stroke-width="36"/>
-  <path d="M512 112V284" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="52" stroke-linecap="round"/>
-  <path d="M512 740V912" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="52" stroke-linecap="round"/>
-  <path d="M112 512H284" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="52" stroke-linecap="round"/>
-  <path d="M740 512H912" stroke="#B8C4CC" stroke-opacity="0.58" stroke-width="52" stroke-linecap="round"/>
+  <title>AgentWallet robot logo</title>
+  <defs>
+    <linearGradient id="agentwallet-bg" x1="120" y1="80" x2="880" y2="940" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#202326"/>
+      <stop offset="1" stop-color="#111315"/>
+    </linearGradient>
+    <linearGradient id="agentwallet-metal" x1="286" y1="248" x2="752" y2="710" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6F747A"/>
+      <stop offset="0.28" stop-color="#3D4146"/>
+      <stop offset="0.62" stop-color="#2A2D31"/>
+      <stop offset="1" stop-color="#585D63"/>
+    </linearGradient>
+    <linearGradient id="agentwallet-eye" x1="420" y1="458" x2="420" y2="584" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#B8C4CC"/>
+    </linearGradient>
+    <filter id="agentwallet-shadow" x="176" y="184" width="672" height="664" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#050607" flood-opacity="0.55"/>
+    </filter>
+    <filter id="agentwallet-inner" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="0" stdDeviation="52" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="156" fill="url(#agentwallet-bg)"/>
+  <rect x="36" y="36" width="952" height="952" rx="124" stroke="#B8C4CC" stroke-opacity="0.05" stroke-width="2"/>
+  <g filter="url(#agentwallet-shadow)">
+    <path d="M296 324H348V292H452V324H480V252H508V324H540V252H568V324H672V292H724V324H760V664H724V696H300V664H264V324H296Z" fill="url(#agentwallet-metal)"/>
+    <path d="M324 412H700V628H324V412Z" fill="#111315"/>
+    <path d="M384 356H412V384H384V356Z" fill="#111315"/>
+    <path d="M440 356H468V384H440V356Z" fill="#111315"/>
+    <path d="M496 356H524V384H496V356Z" fill="#111315"/>
+    <path d="M412 478H448V578H412V478Z" fill="url(#agentwallet-eye)"/>
+    <path d="M576 478H612V578H576V478Z" fill="url(#agentwallet-eye)"/>
+    <path d="M208 516H252V476H284V536H252V576H208V516Z" fill="url(#agentwallet-metal)"/>
+    <path d="M816 516H772V476H740V536H772V576H816V516Z" fill="url(#agentwallet-metal)"/>
+    <path d="M360 736H456V772H360V736Z" fill="url(#agentwallet-metal)"/>
+    <path d="M568 736H664V772H568V736Z" fill="url(#agentwallet-metal)"/>
+    <path d="M296 324H348V292H452V324H480V252H508V324H540V252H568V324H672V292H724V324H760V664H724V696H300V664H264V324H296Z" stroke="#B8C4CC" stroke-opacity="0.16" stroke-width="2"/>
+    <path d="M324 412H700V628H324V412Z" stroke="#B8C4CC" stroke-opacity="0.08" stroke-width="2"/>
+  </g>
+  <g filter="url(#agentwallet-inner)">
+    <path d="M296 324H760" stroke="#E4E6E9" stroke-opacity="0.08" stroke-width="2"/>
+    <path d="M324 412H700" stroke="#E4E6E9" stroke-opacity="0.05" stroke-width="2"/>
+  </g>
 </svg>
