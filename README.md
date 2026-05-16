@@ -6,7 +6,7 @@ Brex/Ramp-style spend controls for AI agents on Solana.
 spend: budgets, approvals, vendor allowlists, recipient allowlists, and audit
 logs outside agent code.
 
-## What is built
+## What is built.
 
 - Next.js dashboard showing policies, approvals, payment decisions, and audit logs.
 - Shared TypeScript policy evaluator used by the API and dashboard.
