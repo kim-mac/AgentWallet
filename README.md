@@ -1,5 +1,5 @@
 # AgentWallet
-
+(Solana Hackathon Winner • Fast-Tracked for Solana Accelerator)
 Brex/Ramp-style spend controls for AI agents on Solana.
 
 `x402` lets agents pay. AgentWallet lets owners control how autonomous agents
