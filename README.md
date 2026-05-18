@@ -25,7 +25,7 @@ logs outside agent code.
 - Devnet test token mint:
   `6XigBN521xmNyFV4DDgLpfGVsXTP3JstsaSTkbpNRXgk`.
 
-## Run the web demo
+## Run the web demo.
 
 ```bash
 npm install
@@ -34,7 +34,7 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-## Configure the devnet demo
+## Configure the devnet demo.
 
 Copy `.env.example` to `.env.local` and fill the values you want to enable:
 
