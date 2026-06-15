@@ -9,6 +9,8 @@ export type ProvisionedAgentRecord = {
   encryptedSecretKey: string;
   apiKeyHash: string;
   apiKeyPrefix: string;
+  exportPasswordHash?: string | null;
+  exportPasswordSalt?: string | null;
   programId: string;
   policyPda: string | null;
   tokenMint: string;
@@ -23,6 +25,14 @@ export type OwnerChallengeRecord = {
   nonce: string;
   message: string;
   expiresAt: string;
+};
+
+export type OwnerSecurityRecord = {
+  owner: string;
+  exportPasswordHash: string | null;
+  exportPasswordSalt: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type TelegramLinkRecord = {
@@ -45,10 +55,33 @@ export type AuditEventRecord = {
   createdAt: string;
 };
 
+export type ApprovalRecord = {
+  id: string;
+  owner: string;
+  agentId: string;
+  agentPublicKey: string;
+  programId: string;
+  policyPda: string;
+  recipient: string;
+  tokenMint: string;
+  amount: string;
+  decimals: number;
+  reason: string;
+  status: "pending" | "approved" | "executed" | "rejected" | "execution_failed";
+  paymentIntentPda: string | null;
+  approvalSignature: string | null;
+  executionSignature: string | null;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ProvisioningStore = {
   saveChallenge(record: OwnerChallengeRecord): Promise<void>;
   getChallenge(owner: string): Promise<OwnerChallengeRecord | null>;
   deleteChallenge(owner: string): Promise<void>;
+  saveOwnerSecurity(record: OwnerSecurityRecord): Promise<void>;
+  getOwnerSecurity(owner: string): Promise<OwnerSecurityRecord | null>;
   saveAgent(record: ProvisionedAgentRecord): Promise<void>;
   getAgent(agentId: string): Promise<ProvisionedAgentRecord | null>;
   listOwnerAgents(owner: string): Promise<ProvisionedAgentRecord[]>;
@@ -59,17 +92,24 @@ export type ProvisioningStore = {
   getAgentByTelegramChat(chatId: string): Promise<ProvisionedAgentRecord | null>;
   linkTelegramChat(agentId: string, chatId: string): Promise<ProvisionedAgentRecord>;
   unlinkTelegramChat(agentId: string): Promise<ProvisionedAgentRecord>;
+  saveApproval(record: ApprovalRecord): Promise<void>;
+  getApproval(approvalId: string): Promise<ApprovalRecord | null>;
+  listApprovals(owner: string, agentId?: string): Promise<ApprovalRecord[]>;
   appendAuditEvent(record: AuditEventRecord): Promise<void>;
   listAuditEvents(owner: string, agentId?: string): Promise<AuditEventRecord[]>;
 };
 
 type MemoryProvisioningState = {
   challenges: Map<string, OwnerChallengeRecord>;
+  ownerSecurity: Map<string, OwnerSecurityRecord>;
   agents: Map<string, ProvisionedAgentRecord>;
   ownerAgents: Map<string, Set<string>>;
   apiKeys: Map<string, string>;
   telegramLinks: Map<string, TelegramLinkRecord>;
   telegramChats: Map<string, string>;
+  approvals: Map<string, ApprovalRecord>;
+  ownerApprovals: Map<string, string[]>;
+  agentApprovals: Map<string, string[]>;
   auditEvents: Map<string, AuditEventRecord>;
   ownerAuditEvents: Map<string, string[]>;
   agentAuditEvents: Map<string, string[]>;
@@ -89,11 +129,15 @@ export function getProvisioningStore(): ProvisioningStore {
 
 export function resetMemoryProvisioningStore() {
   memory.challenges.clear();
+  memory.ownerSecurity.clear();
   memory.agents.clear();
   memory.ownerAgents.clear();
   memory.apiKeys.clear();
   memory.telegramLinks.clear();
   memory.telegramChats.clear();
+  memory.approvals.clear();
+  memory.ownerApprovals.clear();
+  memory.agentApprovals.clear();
   memory.auditEvents.clear();
   memory.ownerAuditEvents.clear();
   memory.agentAuditEvents.clear();
@@ -108,6 +152,12 @@ const memoryStore: ProvisioningStore = {
   },
   async deleteChallenge(owner) {
     memory.challenges.delete(owner);
+  },
+  async saveOwnerSecurity(record) {
+    memory.ownerSecurity.set(record.owner, record);
+  },
+  async getOwnerSecurity(owner) {
+    return memory.ownerSecurity.get(owner) ?? null;
   },
   async saveAgent(record) {
     memory.agents.set(record.id, record);
@@ -176,6 +226,24 @@ const memoryStore: ProvisioningStore = {
     memory.agents.set(agentId, updated);
     return updated;
   },
+  async saveApproval(record) {
+    memory.approvals.set(record.id, record);
+    memory.ownerApprovals.set(record.owner, prependUnique(memory.ownerApprovals.get(record.owner), record.id));
+    memory.agentApprovals.set(record.agentId, prependUnique(memory.agentApprovals.get(record.agentId), record.id));
+  },
+  async getApproval(approvalId) {
+    return memory.approvals.get(approvalId) ?? null;
+  },
+  async listApprovals(owner, agentId) {
+    const approvalIds = agentId
+      ? memory.agentApprovals.get(agentId) ?? []
+      : memory.ownerApprovals.get(owner) ?? [];
+
+    return approvalIds
+      .map((approvalId) => memory.approvals.get(approvalId))
+      .filter((approval): approval is ApprovalRecord => Boolean(approval && approval.owner === owner))
+      .slice(0, 50);
+  },
   async appendAuditEvent(record) {
     memory.auditEvents.set(record.id, record);
     memory.ownerAuditEvents.set(record.owner, [
@@ -210,6 +278,12 @@ const redisStore: ProvisioningStore = {
   },
   async deleteChallenge(owner) {
     await getRedis().del(challengeKey(owner));
+  },
+  async saveOwnerSecurity(record) {
+    await getRedis().set(ownerSecurityKey(record.owner), record);
+  },
+  async getOwnerSecurity(owner) {
+    return getRedis().get<OwnerSecurityRecord>(ownerSecurityKey(owner));
   },
   async saveAgent(record) {
     const client = getRedis();
@@ -279,6 +353,29 @@ const redisStore: ProvisioningStore = {
     await this.saveAgent(updated);
     return updated;
   },
+  async saveApproval(record) {
+    const client = getRedis();
+    await client.set(approvalKey(record.id), record);
+    await client.lrem(ownerApprovalsKey(record.owner), 0, record.id);
+    await client.lpush(ownerApprovalsKey(record.owner), record.id);
+    await client.ltrim(ownerApprovalsKey(record.owner), 0, 99);
+    await client.lrem(agentApprovalsKey(record.agentId), 0, record.id);
+    await client.lpush(agentApprovalsKey(record.agentId), record.id);
+    await client.ltrim(agentApprovalsKey(record.agentId), 0, 99);
+  },
+  async getApproval(approvalId) {
+    return getRedis().get<ApprovalRecord>(approvalKey(approvalId));
+  },
+  async listApprovals(owner, agentId) {
+    const client = getRedis();
+    const approvalIds = agentId
+      ? await client.lrange<string>(agentApprovalsKey(agentId), 0, 49)
+      : await client.lrange<string>(ownerApprovalsKey(owner), 0, 49);
+    const approvals = await Promise.all(
+      (approvalIds ?? []).map((approvalId) => client.get<ApprovalRecord>(approvalKey(approvalId)))
+    );
+    return approvals.filter((approval): approval is ApprovalRecord => Boolean(approval && approval.owner === owner));
+  },
   async appendAuditEvent(record) {
     const client = getRedis();
     await client.set(auditEventKey(record.id), record);
@@ -324,11 +421,15 @@ function getMemoryState(): MemoryProvisioningState {
 
   globalState.__agentspendProvisioningMemory ??= {
     challenges: new Map<string, OwnerChallengeRecord>(),
+    ownerSecurity: new Map<string, OwnerSecurityRecord>(),
     agents: new Map<string, ProvisionedAgentRecord>(),
     ownerAgents: new Map<string, Set<string>>(),
     apiKeys: new Map<string, string>(),
     telegramLinks: new Map<string, TelegramLinkRecord>(),
     telegramChats: new Map<string, string>(),
+    approvals: new Map<string, ApprovalRecord>(),
+    ownerApprovals: new Map<string, string[]>(),
+    agentApprovals: new Map<string, string[]>(),
     auditEvents: new Map<string, AuditEventRecord>(),
     ownerAuditEvents: new Map<string, string[]>(),
     agentAuditEvents: new Map<string, string[]>()
@@ -342,6 +443,10 @@ function requireAgent(agent: ProvisionedAgentRecord | undefined | null, agentId:
     throw new Error(`Agent ${agentId} was not found.`);
   }
   return agent;
+}
+
+function prependUnique(current: string[] | undefined, value: string) {
+  return [value, ...(current ?? []).filter((item) => item !== value)].slice(0, 100);
 }
 
 function secondsUntil(isoDate: string) {
@@ -360,6 +465,10 @@ function ownerAgentsKey(owner: string) {
   return `agentspend:owner:${owner}:agents`;
 }
 
+function ownerSecurityKey(owner: string) {
+  return `agentwallet:owner:${owner}:security`;
+}
+
 function apiKey(apiKeyHash: string) {
   return `agentspend:api:${apiKeyHash}`;
 }
@@ -370,6 +479,18 @@ function telegramLinkKey(code: string) {
 
 function telegramChatKey(chatId: string) {
   return `agentspend:telegram-chat:${chatId}`;
+}
+
+function approvalKey(approvalId: string) {
+  return `agentwallet:approval:${approvalId}`;
+}
+
+function ownerApprovalsKey(owner: string) {
+  return `agentwallet:owner:${owner}:approvals`;
+}
+
+function agentApprovalsKey(agentId: string) {
+  return `agentwallet:agent:${agentId}:approvals`;
 }
 
 function auditEventKey(eventId: string) {

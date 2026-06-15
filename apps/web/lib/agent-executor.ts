@@ -1,6 +1,16 @@
 import { Keypair } from "@solana/web3.js";
 import { z } from "zod";
-import { explainAgentSpendError } from "./anchor-errors";
+import {
+  explainAgentSpendError,
+  getAgentSpendErrorDetails,
+  type AgentSpendErrorDetails
+} from "./anchor-errors";
+import {
+  createPendingApproval,
+  findUsableApproval,
+  markApprovalExecuted,
+  type ApprovalPaymentShape
+} from "./agent-approvals";
 import {
   decryptAgentKeypair,
   getAgentByApiKey
@@ -40,6 +50,7 @@ export type AgentPaymentResult = {
   explorerUrl: string;
   agentTokenAccount: string;
   recipientTokenAccount: string;
+  approvalId?: string;
 };
 
 export async function executeAgentPayment(
@@ -64,7 +75,13 @@ export async function executeProvisionedAgentPayment(
   const agentRecord = await getAgentByApiKey(apiKey);
 
   if (!agentRecord) {
-    throw new AgentExecutionError("Invalid agent API key.", 401);
+    throw new AgentExecutionError("Invalid agent API key.", 401, {
+      code: "INVALID_AGENT_API_KEY",
+      message: "Agent API key is missing or invalid.",
+      humanMessage: "Invalid agent API key.",
+      agentMessage: "Use a valid AgentWallet API key from the selected hosted agent.",
+      suggestedAction: "rotate_or_update_agent_api_key"
+    });
   }
 
   return executeProvisionedAgentRecordPayment(agentRecord, input);
@@ -76,16 +93,35 @@ export async function executeProvisionedAgentRecordPayment(
 ): Promise<AgentPaymentResult> {
   const body = executePaymentSchema.parse(input);
   const agent = decryptAgentKeypair(agentRecord);
+  const payment: ApprovalPaymentShape = {
+    owner: agentRecord.owner,
+    agentId: agentRecord.id,
+    agentPublicKey: agentRecord.publicKey,
+    programId: body.programId ?? agentRecord.programId,
+    policyPda: requirePolicyPda(body.policyPda ?? agentRecord.policyPda),
+    recipient: body.recipient,
+    tokenMint: body.tokenMint ?? agentRecord.tokenMint,
+    amount: body.amount,
+    decimals: body.decimals ?? agentRecord.decimals,
+    reason: "Owner approval is required."
+  };
 
   try {
+    const approval = await findUsableApproval(agentRecord.id, payment);
     const result = await executePaymentWithAgent(agent, {
-      programId: body.programId ?? agentRecord.programId,
-      policyPda: requirePolicyPda(body.policyPda ?? agentRecord.policyPda),
-      recipient: body.recipient,
-      tokenMint: body.tokenMint ?? agentRecord.tokenMint,
-      amount: body.amount,
-      decimals: body.decimals ?? agentRecord.decimals
+      programId: payment.programId,
+      policyPda: payment.policyPda,
+      recipient: payment.recipient,
+      tokenMint: payment.tokenMint,
+      amount: payment.amount,
+      decimals: payment.decimals,
+      paymentIntentPda: approval?.paymentIntentPda ?? undefined
     });
+
+    if (approval) {
+      await markApprovalExecuted(agentRecord.id, approval.id, result.signature);
+      result.approvalId = approval.id;
+    }
 
     await appendAuditEvent({
       owner: agentRecord.owner,
@@ -104,11 +140,21 @@ export async function executeProvisionedAgentRecordPayment(
 
     return result;
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Payment rejected by policy.";
+    if (isOwnerApprovalRequired(message)) {
+      const approval = await createPendingApproval(payment);
+      throw new AgentExecutionError(
+        `Owner approval required. Approval request ${approval.id} is waiting in AgentWallet.`,
+        402,
+        getAgentSpendErrorDetails({ InstructionError: [0, { Custom: 6009 }] })
+      );
+    }
+
     await appendAuditEvent({
       owner: agentRecord.owner,
       agentId: agentRecord.id,
       type: "payment_rejected",
-      message: error instanceof Error ? error.message : "Payment rejected by policy.",
+      message,
       status: "rejected",
       metadata: {
         recipient: body.recipient,
@@ -122,7 +168,9 @@ export async function executeProvisionedAgentRecordPayment(
 
 async function executePaymentWithAgent(
   agent: Keypair,
-  body: Required<Pick<ExecutePaymentInput, "programId" | "policyPda" | "recipient" | "tokenMint" | "amount" | "decimals">>
+  body: Required<Pick<ExecutePaymentInput, "programId" | "policyPda" | "recipient" | "tokenMint" | "amount" | "decimals">> & {
+    paymentIntentPda?: string;
+  }
 ): Promise<AgentPaymentResult> {
   const connection = createDevnetConnection();
   const { transaction, lastValidBlockHeight, agentTokenAccount, recipientTokenAccount } =
@@ -132,7 +180,8 @@ async function executePaymentWithAgent(
       recipient: body.recipient,
       tokenMint: body.tokenMint,
       amount: body.amount,
-      decimals: String(body.decimals)
+      decimals: String(body.decimals),
+      paymentIntentPda: body.paymentIntentPda
     });
 
   transaction.sign(agent);
@@ -140,14 +189,27 @@ async function executePaymentWithAgent(
   const simulation = await connection.simulateTransaction(transaction);
 
   if (simulation.value.err) {
-    throw new AgentExecutionError(explainAgentSpendError(simulation.value.err), 400);
+    throw new AgentExecutionError(
+      explainAgentSpendError(simulation.value.err),
+      400,
+      getAgentSpendErrorDetails(simulation.value.err)
+    );
   }
 
-  const signature = await connection.sendRawTransaction(transaction.serialize(), {
-    skipPreflight: false
-  });
+  let signature: string;
+  try {
+    signature = await connection.sendRawTransaction(transaction.serialize(), {
+      skipPreflight: false
+    });
 
-  await confirmSignatureByPolling(signature, lastValidBlockHeight);
+    await confirmSignatureByPolling(signature, lastValidBlockHeight);
+  } catch (error) {
+    throw new AgentExecutionError(
+      explainAgentSpendError(error),
+      error instanceof AgentExecutionError ? error.status : 400,
+      getAgentSpendErrorDetails(error)
+    );
+  }
 
   return {
     ok: true,
@@ -165,7 +227,17 @@ async function executePaymentWithAgent(
 
 function requirePolicyPda(policyPda: string | null | undefined) {
   if (!policyPda) {
-    throw new AgentExecutionError("This agent does not have an initialized policy PDA yet.", 400);
+    throw new AgentExecutionError(
+      "This agent does not have an initialized policy PDA yet.",
+      400,
+      {
+        code: "POLICY_NOT_INITIALIZED",
+        message: "Agent policy PDA is not initialized.",
+        humanMessage: "This agent does not have an initialized policy PDA yet.",
+        agentMessage: "Ask the owner to initialize or update the on-chain policy before requesting payments.",
+        suggestedAction: "request_owner_policy_update"
+      }
+    );
   }
   return policyPda;
 }
@@ -194,9 +266,32 @@ export async function withAgentExecutionTimeout<T>(promise: Promise<T>): Promise
 }
 
 export class AgentExecutionError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly details?: AgentSpendErrorDetails
+  ) {
     super(message);
   }
+}
+
+export function formatAgentExecutionError(error: unknown) {
+  const message = error instanceof Error ? error.message : "AgentWallet payment failed.";
+  const details = error instanceof AgentExecutionError ? error.details : undefined;
+
+  return {
+    ok: false,
+    error: message,
+    ...(details
+      ? {
+          code: details.code,
+          message: details.message,
+          humanMessage: details.humanMessage,
+          agentMessage: details.agentMessage,
+          suggestedAction: details.suggestedAction
+        }
+      : {})
+  };
 }
 
 async function confirmSignatureByPolling(signature: string, lastValidBlockHeight: number) {
@@ -231,4 +326,8 @@ async function confirmSignatureByPolling(signature: string, lastValidBlockHeight
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isOwnerApprovalRequired(message: string) {
+  return /owner approval threshold|approval is required|Custom"?\s*:?\s*6009|0x1779/i.test(message);
 }

@@ -12,6 +12,8 @@
   "dependencies": {
     "@agentspend/policy-simulator": "file:../../packages/policy-simulator",
     "@agentspend/shared": "file:../../packages/shared",
+    "@agentwallet/sdk": "file:../../packages/agentwallet-sdk",
+    "@mysten/sui": "^2.17.0",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
     "@upstash/redis": "^1.38.0",

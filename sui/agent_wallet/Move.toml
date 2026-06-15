@@ -1,0 +1,6 @@
+[package]
+name = "agent_wallet"
+edition = "2024.beta"
+
+[addresses]
+agent_wallet = "0x0"

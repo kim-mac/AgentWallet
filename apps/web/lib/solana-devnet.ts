@@ -18,19 +18,22 @@ import { Buffer } from "buffer";
 export const devnetCluster = "devnet";
 export const devnetRpcUrl = clusterApiUrl(devnetCluster);
 export const solanaExplorerBaseUrl = "https://explorer.solana.com";
-export const defaultAgentSpendProgramId = "9eZMFa68NmfF4YNz5cF96AsJukbRzvvP1TDktN4cfbDU";
+export const defaultAgentSpendProgramId = "C47kWvinbJVvPyZoSvLBjRjWXaoDGjsSadp2S1VgiLQN";
 export const defaultDevnetUsdcMint = "6XigBN521xmNyFV4DDgLpfGVsXTP3JstsaSTkbpNRXgk";
 export const memoProgramId = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
-export const agentSpendSeed = "policy";
+export const agentSpendSeed = "policy_v2";
 
 const initializePolicyDiscriminator = Buffer.from([9, 186, 86, 225, 129, 162, 231, 56]);
 const updatePolicyDiscriminator = Buffer.from([212, 245, 246, 7, 163, 151, 18, 57]);
 const pausePolicyDiscriminator = Buffer.from([162, 125, 168, 118, 196, 17, 113, 165]);
 const resumePolicyDiscriminator = Buffer.from([19, 5, 135, 187, 83, 243, 251, 235]);
+const approvePaymentIntentDiscriminator = Buffer.from([203, 166, 97, 54, 229, 54, 111, 200]);
 const executePaymentDiscriminator = Buffer.from([86, 4, 7, 7, 120, 139, 232, 139]);
 
 export type PhantomProvider = {
   isPhantom?: boolean;
+  isMetaMask?: boolean;
+  _metamask?: unknown;
   publicKey?: PublicKey;
   connect: () => Promise<{ publicKey: PublicKey }>;
   signAndSendTransaction: (
@@ -59,6 +62,7 @@ export type OnchainPolicyConfig = {
   programId: string;
   agent: string;
   tokenMint: string;
+  allowedTokenMints?: string;
   allowedRecipients: string;
   periodSeconds: string;
 };
@@ -66,6 +70,7 @@ export type OnchainPolicyConfig = {
 export type AnchorPolicyArgs = {
   agent: PublicKey;
   tokenMint: PublicKey;
+  allowedTokenMints: PublicKey[];
   maxPerPayment: bigint;
   dailyBudget: bigint;
   approvalThreshold: bigint;
@@ -86,6 +91,16 @@ export type ExecutePaymentConfig = {
   tokenMint: string;
   amount: string;
   decimals: string;
+  paymentIntentPda?: string;
+};
+
+export type ApprovePaymentIntentConfig = {
+  programId: string;
+  policyPda: string;
+  recipient: string;
+  amount: string;
+  decimals: string;
+  expiresAt: number;
 };
 
 export function getPhantomProvider(): PhantomProvider | null {
@@ -98,7 +113,27 @@ export function getPhantomProvider(): PhantomProvider | null {
     phantom?: { solana?: PhantomProvider };
   };
 
-  return maybeWindow.phantom?.solana ?? maybeWindow.solana ?? null;
+  const nestedProvider = maybeWindow.phantom?.solana;
+  if (isUsablePhantomProvider(nestedProvider)) {
+    return nestedProvider;
+  }
+
+  const directProvider = maybeWindow.solana;
+  if (isUsablePhantomProvider(directProvider)) {
+    return directProvider;
+  }
+
+  return null;
+}
+
+function isUsablePhantomProvider(provider: PhantomProvider | undefined): provider is PhantomProvider {
+  return Boolean(
+    provider?.isPhantom &&
+      !provider.isMetaMask &&
+      !provider._metamask &&
+      typeof provider.connect === "function" &&
+      typeof provider.signAndSendTransaction === "function"
+  );
 }
 
 export function createDevnetConnection(): Connection {
@@ -127,6 +162,25 @@ export function parseRecipientPublicKeys(value: string): PublicKey[] {
   return recipients;
 }
 
+export function parseTokenMintPublicKeys(value: string, fallbackMint?: string): PublicKey[] {
+  const tokenMints = value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const finalTokenMints = tokenMints.length ? tokenMints : fallbackMint ? [fallbackMint] : [];
+  const parsedTokenMints = finalTokenMints.map((item) => parsePublicKey(item, "Allowed token mint"));
+
+  if (!parsedTokenMints.length) {
+    throw new Error("Select at least one allowed token mint.");
+  }
+
+  if (parsedTokenMints.length > 12) {
+    throw new Error("Allowed token mints cannot exceed 12 addresses.");
+  }
+
+  return parsedTokenMints;
+}
+
 export function derivePolicyPda(
   programId: PublicKey,
   owner: PublicKey,
@@ -138,13 +192,43 @@ export function derivePolicyPda(
   );
 }
 
+export function derivePaymentIntentPda(
+  programId: PublicKey,
+  policyPda: PublicKey,
+  recipient: PublicKey,
+  amount: bigint,
+  expiresAt: bigint
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("payment_intent"),
+      policyPda.toBuffer(),
+      recipient.toBuffer(),
+      encodeU64(amount),
+      encodeI64(expiresAt)
+    ],
+    programId
+  );
+}
+
 export function buildAnchorPolicyArgs(
   policy: AgentPolicy,
   config: OnchainPolicyConfig
 ): AnchorPolicyArgs {
+  const allowedTokenMints = parseTokenMintPublicKeys(
+    config.allowedTokenMints ?? config.tokenMint,
+    config.tokenMint
+  );
+  const primaryTokenMint = config.tokenMint || allowedTokenMints[0]?.toBase58();
+
+  if (!primaryTokenMint) {
+    throw new Error("Select at least one allowed token mint.");
+  }
+
   return {
     agent: parsePublicKey(config.agent, "Agent"),
-    tokenMint: parsePublicKey(config.tokenMint, "Token mint"),
+    tokenMint: parsePublicKey(primaryTokenMint, "Token mint"),
+    allowedTokenMints,
     maxPerPayment: usdToTokenUnits(policy.maxPerPaymentUsd),
     dailyBudget: usdToTokenUnits(policy.dailyBudgetUsd),
     approvalThreshold: usdToTokenUnits(policy.approvalThresholdUsd),
@@ -202,6 +286,32 @@ export function buildOwnerPolicyActionInstruction(
   });
 }
 
+export function buildApprovePaymentIntentInstruction(
+  programId: PublicKey,
+  owner: PublicKey,
+  policyPda: PublicKey,
+  recipient: PublicKey,
+  paymentIntentPda: PublicKey,
+  amount: bigint,
+  expiresAt: bigint
+): TransactionInstruction {
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      { pubkey: owner, isSigner: true, isWritable: true },
+      { pubkey: policyPda, isSigner: false, isWritable: false },
+      { pubkey: recipient, isSigner: false, isWritable: false },
+      { pubkey: paymentIntentPda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
+    ],
+    data: Buffer.concat([
+      approvePaymentIntentDiscriminator,
+      encodeU64(amount),
+      encodeI64(expiresAt)
+    ])
+  });
+}
+
 export async function buildAnchorPolicyTransaction(
   connection: Connection,
   owner: PublicKey,
@@ -222,6 +332,36 @@ export async function buildAnchorPolicyTransaction(
   };
 }
 
+export async function buildApprovePaymentIntentTransaction(
+  connection: Connection,
+  owner: PublicKey,
+  config: ApprovePaymentIntentConfig
+): Promise<{
+  transaction: Transaction;
+  blockhash: string;
+  lastValidBlockHeight: number;
+  paymentIntentPda: PublicKey;
+}> {
+  const programId = parsePublicKey(config.programId, "Program ID");
+  const policyPda = parsePublicKey(config.policyPda, "Policy PDA");
+  const recipient = parsePublicKey(config.recipient, "Payment recipient");
+  const amount = tokenAmountToUnits(config.amount, Number(config.decimals));
+  const expiresAt = BigInt(Math.floor(config.expiresAt));
+  const [paymentIntentPda] = derivePaymentIntentPda(programId, policyPda, recipient, amount, expiresAt);
+  const instruction = buildApprovePaymentIntentInstruction(
+    programId,
+    owner,
+    policyPda,
+    recipient,
+    paymentIntentPda,
+    amount,
+    expiresAt
+  );
+  const result = await buildAnchorPolicyTransaction(connection, owner, instruction);
+
+  return { ...result, paymentIntentPda };
+}
+
 export async function buildExecutePaymentTransaction(
   connection: Connection,
   agent: PublicKey,
@@ -237,6 +377,9 @@ export async function buildExecutePaymentTransaction(
   const policyPda = parsePublicKey(config.policyPda, "Policy PDA");
   const recipient = parsePublicKey(config.recipient, "Payment recipient");
   const mint = parsePublicKey(config.tokenMint, "Token mint");
+  const paymentIntentPda = config.paymentIntentPda
+    ? parsePublicKey(config.paymentIntentPda, "Payment intent PDA")
+    : null;
   const decimals = Number(config.decimals);
   const amount = tokenAmountToUnits(config.amount, decimals);
   const agentTokenAccount = getAssociatedTokenAddressSync(mint, agent, false, TOKEN_PROGRAM_ID);
@@ -272,6 +415,7 @@ export async function buildExecutePaymentTransaction(
       agentTokenAccount,
       recipientTokenAccount,
       mint,
+      paymentIntentPda,
       amount,
       decimals
     })
@@ -357,6 +501,7 @@ function buildExecutePaymentInstruction({
   agentTokenAccount,
   recipientTokenAccount,
   mint,
+  paymentIntentPda,
   amount,
   decimals
 }: {
@@ -367,6 +512,7 @@ function buildExecutePaymentInstruction({
   agentTokenAccount: PublicKey;
   recipientTokenAccount: PublicKey;
   mint: PublicKey;
+  paymentIntentPda: PublicKey | null;
   amount: bigint;
   decimals: number;
 }): TransactionInstruction {
@@ -380,7 +526,7 @@ function buildExecutePaymentInstruction({
       { pubkey: recipientTokenAccount, isSigner: false, isWritable: true },
       { pubkey: mint, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: programId, isSigner: false, isWritable: false }
+      { pubkey: paymentIntentPda ?? programId, isSigner: false, isWritable: Boolean(paymentIntentPda) }
     ],
     data: Buffer.concat([executePaymentDiscriminator, encodeU64(amount), Buffer.from([decimals])])
   });
@@ -394,7 +540,8 @@ function encodeInitializePolicyArgs(args: AnchorPolicyArgs): Buffer {
     encodeU64(args.dailyBudget),
     encodeU64(args.approvalThreshold),
     encodeI64(args.periodSeconds),
-    encodePubkeyVec(args.allowedRecipients)
+    encodePubkeyVec(args.allowedRecipients),
+    encodePubkeyVec(args.allowedTokenMints)
   ]);
 }
 
@@ -404,7 +551,8 @@ function encodeUpdatePolicyArgs(args: AnchorPolicyArgs): Buffer {
     encodeU64(args.dailyBudget),
     encodeU64(args.approvalThreshold),
     encodeI64(args.periodSeconds),
-    encodePubkeyVec(args.allowedRecipients)
+    encodePubkeyVec(args.allowedRecipients),
+    encodePubkeyVec(args.allowedTokenMints)
   ]);
 }
 

@@ -24,6 +24,25 @@ import type { Dispatch, SetStateAction } from "react";
 import { simulatePolicyAttacks } from "@agentspend/policy-simulator";
 import type { SpendEvent } from "@agentspend/shared";
 import { parseAgentCommand } from "../lib/agent-command";
+import {
+  applySuiDeepBookMarket,
+  buildSuiDashboardCommands,
+  canReviewSuiLaunchStage,
+  findSuiDeepBookMarketId,
+  getSuiFundingReadiness,
+  getSuiGasReadiness,
+  getSuiLaunchStage,
+  mergeSuiActivityIntoConfig,
+  normalizeSuiDashboardConfig,
+  resolveSuiActivityConfig,
+  type SuiActivityEvent,
+  type SuiDashboardConfig,
+  type SuiDeepBookOrder,
+  type SuiLaunchStage,
+  suiActivityEventLabels,
+  suiDeepBookMarkets,
+  suiOverflowProofItems
+} from "../lib/sui-dashboard";
 import { policy as initialPolicy, spendEvents } from "../lib/demo-data";
 import {
   parseDemoState,
@@ -33,8 +52,24 @@ import {
 } from "../lib/demo-state";
 import type { PolicyFormValues } from "../lib/demo-state";
 import {
+  buildSuiAutonomousDemoSteps,
+  buildSuiOverBudgetConfig,
+  mergeSuiActionResultIntoConfig,
+  parseSuiAgentMandate,
+  submitSuiDashboardAction,
+  type SuiDashboardActionId
+} from "../lib/sui-dashboard-actions";
+import {
+  decryptSuiLocalWalletBundle,
+  encryptSuiLocalWalletBundle,
+  generateSuiLocalWalletBundle,
+  type EncryptedSuiLocalWalletBundle,
+  type SuiLocalWalletBundle
+} from "../lib/sui-local-wallets";
+import {
   buildAnchorPolicyArgs,
   buildAnchorPolicyTransaction,
+  buildApprovePaymentIntentTransaction,
   buildExecutePaymentTransaction,
   buildInitializePolicyInstruction,
   buildOwnerPolicyActionInstruction,
@@ -53,8 +88,14 @@ import {
 const storageKey = "agentwallet.dashboard-state.v2";
 const agentRegistryStorageKey = "agentspend.agent-registry.v1";
 const tokenCatalogStorageKey = "agentwallet.token-catalog.v1";
+const suiDashboardStorageKey = "agentwallet.sui-dashboard.v1";
+const suiLocalWalletStorageKey = "agentwallet.sui-local-wallets.v1";
 const demoMerchantResourcePath = "/api/demo-merchant/resource";
 const sdkBaseUrlExample = "https://your-agentwallet.vercel.app";
+
+function getSuggestedHostedAgentName(existingAgentCount: number) {
+  return `Agent ${existingAgentCount + 1}`;
+}
 
 const defaultOnchainPolicyForm = {
   programId: defaultAgentSpendProgramId,
@@ -90,7 +131,7 @@ const defaultTokenCatalog: CatalogItem[] = [
   }
 ];
 
-type DashboardView = "operations" | "simulator" | "audit";
+type DashboardView = "operations" | "sui" | "simulator" | "audit";
 
 type AgentChatMessage = {
   id: string;
@@ -127,6 +168,12 @@ type ProvisionedAgent = {
   updatedAt: string;
 };
 
+type ExportedAgentWallet = {
+  publicKey: string;
+  secretKeyBase58: string;
+  secretKeyBytes: number[];
+};
+
 type AgentWalletAuditEvent = {
   id: string;
   type: string;
@@ -135,6 +182,27 @@ type AgentWalletAuditEvent = {
   signature?: string;
   explorerUrl?: string;
   createdAt: string;
+};
+
+type AgentApproval = {
+  id: string;
+  owner: string;
+  agentId: string;
+  agentPublicKey: string;
+  programId: string;
+  policyPda: string;
+  recipient: string;
+  tokenMint: string;
+  amount: string;
+  decimals: number;
+  reason: string;
+  status: "pending" | "approved" | "executed" | "rejected" | "execution_failed";
+  paymentIntentPda: string | null;
+  approvalSignature: string | null;
+  executionSignature: string | null;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export default function Dashboard() {
@@ -209,7 +277,14 @@ export default function Dashboard() {
   const [latestProvisionedApiKey, setLatestProvisionedApiKey] = useState<string | null>(null);
   const [telegramLinkStatus, setTelegramLinkStatus] = useState("Create a link code, then send it to the shared Telegram bot.");
   const [telegramLinkCode, setTelegramLinkCode] = useState<string | null>(null);
+  const [ownerExportPasswordSet, setOwnerExportPasswordSet] = useState(false);
+  const [exportPassword, setExportPassword] = useState("");
+  const [exportStatus, setExportStatus] = useState("Set one owner recovery password before creating hosted agent wallets.");
+  const [exportedAgentWallet, setExportedAgentWallet] = useState<ExportedAgentWallet | null>(null);
   const [serverAuditEvents, setServerAuditEvents] = useState<AgentWalletAuditEvent[]>([]);
+  const [approvalRequests, setApprovalRequests] = useState<AgentApproval[]>([]);
+  const [approvalStatus, setApprovalStatus] = useState("Above-threshold agent payments will appear here for owner approval.");
+  const [dismissedApprovalToastIds, setDismissedApprovalToastIds] = useState<string[]>([]);
   const [x402Status, setX402Status] = useState("Run the paid API demo after selecting a funded hosted agent.");
   const [x402ExplorerUrl, setX402ExplorerUrl] = useState<string | null>(null);
   const [x402Response, setX402Response] = useState<string | null>(null);
@@ -247,6 +322,10 @@ export default function Dashboard() {
     [events, serverAuditEvents]
   );
   const deniedEvents = displayedAuditEvents.filter((event) => event.decision === "denied");
+  const pendingApprovalToast = approvalRequests.find(
+    (approval) =>
+      approval.status === "pending" && !dismissedApprovalToastIds.includes(approval.id)
+  ) ?? null;
 
   useEffect(() => {
     const snapshot = parseDemoState(window.localStorage.getItem(storageKey));
@@ -504,7 +583,9 @@ export default function Dashboard() {
     });
     await readJsonResponse(verifyResponse);
     setOwnerAuthStatus("Owner wallet signed in. Loading hosted agents...");
+    await loadOwnerSecurity();
     const agents = await loadProvisionedAgentsWithRetry();
+    await loadApprovalRequests(selectedProvisionedAgentId);
     setAnchorStatus("Wallet connected and signed in on devnet.");
     setOwnerAuthStatus(
       agents.length
@@ -533,6 +614,26 @@ export default function Dashboard() {
     }
   }
 
+  async function loadOwnerSecurity() {
+    const response = await fetch("/api/owner/security", {
+      cache: "no-store",
+      credentials: "same-origin"
+    });
+    const payload = await readJsonResponse<{ security: { exportPasswordSet: boolean } }>(response);
+    setOwnerExportPasswordSet(payload.security.exportPasswordSet);
+    setExportStatus(
+      payload.security.exportPasswordSet
+        ? "Owner recovery password is set. Select an agent and enter it to reveal that wallet key."
+        : "Set one owner recovery password before creating hosted agent wallets."
+    );
+    if (payload.security.exportPasswordSet) {
+      setNewAgentName((current) =>
+        current.trim() ? current : getSuggestedHostedAgentName(provisionedAgents.length)
+      );
+    }
+    return payload.security;
+  }
+
   async function loadAgentWalletAudit(apiKey = agentApiKey.trim()) {
     if (!apiKey) {
       return;
@@ -546,6 +647,17 @@ export default function Dashboard() {
     setServerAuditEvents(payload.events);
   }
 
+  async function loadApprovalRequests(agentId = selectedProvisionedAgentId) {
+    const query = agentId ? `?agentId=${encodeURIComponent(agentId)}` : "";
+    const response = await fetch(`/api/approvals${query}`, {
+      cache: "no-store",
+      credentials: "same-origin"
+    });
+    const payload = await readJsonResponse<{ approvals: AgentApproval[] }>(response);
+    setApprovalRequests(payload.approvals);
+    return payload.approvals;
+  }
+
   async function createHostedAgent() {
     if (!walletAddress) {
       setOwnerAuthStatus("Connect and sign with the owner wallet before creating an agent.");
@@ -555,6 +667,12 @@ export default function Dashboard() {
     const trimmedName = newAgentName.trim();
     if (!trimmedName) {
       setOwnerAuthStatus("Enter an agent name before generating a hosted wallet.");
+      return;
+    }
+
+    if (!ownerExportPasswordSet) {
+      setOwnerAuthStatus("Set the owner recovery password before generating hosted agent wallets.");
+      setExportStatus("Set one owner recovery password first. It will unlock exports for every hosted agent wallet you create.");
       return;
     }
 
@@ -630,8 +748,65 @@ export default function Dashboard() {
     }
   }
 
+  async function setOwnerRecoveryPassword() {
+    if (!exportPassword.trim()) {
+      setExportStatus("Enter an owner recovery password first.");
+      return;
+    }
+
+    try {
+      setExportStatus("Setting owner recovery password...");
+      const response = await fetch("/api/owner/security", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: exportPassword })
+      });
+      const payload = await readJsonResponse<{ security: { exportPasswordSet: boolean } }>(response);
+      setOwnerExportPasswordSet(payload.security.exportPasswordSet);
+      setExportedAgentWallet(null);
+      setNewAgentName((current) =>
+        current.trim() ? current : getSuggestedHostedAgentName(provisionedAgents.length)
+      );
+      setOwnerAuthStatus("Owner recovery password set. You can generate a hosted agent wallet now.");
+      setExportStatus("Owner recovery password set. You can use it to export any hosted agent wallet.");
+      await loadAgentWalletAudit();
+    } catch (error) {
+      setExportStatus(getErrorMessage(error));
+    }
+  }
+
+  async function exportHostedAgentWallet(agentId: string) {
+    if (!exportPassword.trim()) {
+      setExportStatus("Enter the owner recovery password first.");
+      return;
+    }
+
+    try {
+      setExportStatus("Exporting hosted agent wallet...");
+      setExportedAgentWallet(null);
+      const response = await fetch(`/api/agents/${agentId}/export-key`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: exportPassword })
+      });
+      const exported = await readJsonResponse<ExportedAgentWallet>(response);
+      setExportedAgentWallet(exported);
+      setExportStatus("Private key revealed. Copy it carefully and treat this wallet as exported.");
+      await loadAgentWalletAudit();
+    } catch (error) {
+      setExportStatus(getErrorMessage(error));
+    }
+  }
+
   function loadProvisionedAgentIntoPolicy(agent: ProvisionedAgent) {
     setSelectedProvisionedAgentId(agent.id);
+    setExportedAgentWallet(null);
+    setExportPassword("");
+    setExportStatus(
+      ownerExportPasswordSet
+        ? "Enter the owner recovery password to reveal this wallet private key."
+        : "Set one owner recovery password before creating or exporting hosted wallets."
+    );
     setSelectedAgentId(agent.id);
     setAgentRegistry((current) =>
       upsertAgentRegistryEntry(current, {
@@ -663,6 +838,9 @@ export default function Dashboard() {
           ? "Hosted agent loaded into the Anchor policy card. Initialize its policy account next."
           : "Hosted agent selected. Connect the owner wallet so AgentWallet can derive and initialize its policy PDA."
     );
+    void loadApprovalRequests(agent.id).catch(() => {
+      setApprovalStatus("Sign in with the owner wallet to load approval requests.");
+    });
   }
 
   function clearHostedAgentSelection() {
@@ -832,6 +1010,7 @@ export default function Dashboard() {
       const programId = parsePublicKey(onchainPolicyForm.programId, "Program ID");
       const args = buildAnchorPolicyArgs(policy, {
         ...onchainPolicyForm,
+        allowedTokenMints: activeCatalogValues(tokenCatalog).join(", "),
         allowedRecipients: activeCatalogValues(recipientCatalog).join(", ")
       });
       const [derivedPolicyPda] = derivePolicyPda(programId, owner, args.agent);
@@ -1011,6 +1190,123 @@ export default function Dashboard() {
     }
   }
 
+  async function approvePaymentRequest(approval: AgentApproval) {
+    const provider = getPhantomProvider();
+
+    if (!provider) {
+      setApprovalStatus("Phantom wallet was not found in this browser.");
+      return;
+    }
+
+    try {
+      const response = provider.publicKey ? { publicKey: provider.publicKey } : await provider.connect();
+      const owner = response.publicKey;
+
+      if (owner.toBase58() !== approval.owner) {
+        setApprovalStatus("Switch Phantom to the owner wallet that controls this policy.");
+        return;
+      }
+
+      const connection = createDevnetConnection();
+      const { transaction, blockhash, lastValidBlockHeight, paymentIntentPda } =
+        await buildApprovePaymentIntentTransaction(connection, owner, {
+          programId: approval.programId,
+          policyPda: approval.policyPda,
+          recipient: approval.recipient,
+          amount: approval.amount,
+          decimals: String(approval.decimals),
+          expiresAt: Math.floor(new Date(approval.expiresAt).getTime() / 1000)
+        });
+
+      setApprovalStatus("Waiting for owner wallet approval...");
+      const result = await provider.signAndSendTransaction(transaction);
+      const signature = typeof result === "string" ? result : result.signature;
+
+      setApprovalStatus("Approval submitted. Confirming on devnet...");
+      await connection.confirmTransaction(
+        { signature, blockhash, lastValidBlockHeight },
+        "confirmed"
+      );
+
+      setApprovalStatus("Approval confirmed. AgentWallet is executing with the hosted agent wallet...");
+      const confirmResponse = await fetch(`/api/approvals/${approval.id}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          signature,
+          paymentIntentPda: paymentIntentPda.toBase58()
+        })
+      });
+      const payload = await readJsonResponse<{
+        approval: AgentApproval;
+        payment: { signature: string; explorerUrl?: string };
+      }>(confirmResponse);
+
+      setExecuteSignature(payload.payment.signature);
+      setExecuteStatus("Owner approved and AgentWallet executed the payment automatically.");
+      setApprovalStatus(`Approved and executed automatically. Payment signature: ${payload.payment.signature}.`);
+      setAgentMessages((current) => [
+        ...current,
+        {
+          id: `agent_auto_approved_${Date.now()}`,
+          role: "agent",
+          status: "approved",
+          explorerUrl: payload.payment.explorerUrl,
+          content: `Owner approved the pending payment and AgentWallet executed it on devnet. Signature: ${payload.payment.signature}.`
+        }
+      ]);
+      await loadApprovalRequests(selectedProvisionedAgentId);
+      if (agentApiKey.trim()) {
+        await loadAgentWalletAudit();
+      }
+    } catch (error) {
+      const message = getErrorMessage(error);
+      setApprovalStatus(message);
+      setExecuteStatus(message);
+      setAgentMessages((current) => [
+        ...current,
+        {
+          id: `agent_approval_failed_${Date.now()}`,
+          role: "agent",
+          status: "rejected",
+          content: message
+        }
+      ]);
+      await loadApprovalRequests(selectedProvisionedAgentId);
+      if (agentApiKey.trim()) {
+        await loadAgentWalletAudit();
+      }
+    }
+  }
+
+  async function rejectPaymentRequest(approval: AgentApproval) {
+    try {
+      setApprovalStatus("Rejecting approval request...");
+      const response = await fetch(`/api/approvals/${approval.id}/reject`, {
+        method: "POST",
+        credentials: "same-origin"
+      });
+      await readJsonResponse<{ approval: AgentApproval }>(response);
+      setApprovalStatus("Approval request rejected.");
+      setAgentMessages((current) => [
+        ...current,
+        {
+          id: `agent_rejected_by_owner_${Date.now()}`,
+          role: "agent",
+          status: "rejected",
+          content: `Owner rejected the pending ${approval.amount} token payment to ${shortAddress(approval.recipient)}.`
+        }
+      ]);
+      setDismissedApprovalToastIds((current) => [...current, approval.id]);
+      await loadApprovalRequests(selectedProvisionedAgentId);
+      if (agentApiKey.trim()) {
+        await loadAgentWalletAudit();
+      }
+    } catch (error) {
+      setApprovalStatus(getErrorMessage(error));
+    }
+  }
+
   async function requestDevnetTokens() {
     const provider = getPhantomProvider();
 
@@ -1163,12 +1459,17 @@ export default function Dashboard() {
       };
 
       if (!response.ok || !payload.ok) {
+        if (response.status === 402) {
+          await loadApprovalRequests(selectedProvisionedAgentId);
+          setApprovalStatus("A payment needs owner approval. Review it in Owner approvals.");
+        }
         throw new Error(payload.error ?? "The agent payment was rejected.");
       }
 
       setExecuteSignature(payload.signature ?? null);
       setExecuteStatus("Agent API executed a policy-gated payment on devnet.");
       await loadAgentWalletAudit();
+      await loadApprovalRequests(selectedProvisionedAgentId);
       setAgentMessages((current) => [
         ...current,
         {
@@ -1319,6 +1620,13 @@ export default function Dashboard() {
             <Gauge size={17} /> Operations
           </button>
           <button
+            className={activeView === "sui" ? "active" : ""}
+            type="button"
+            onClick={() => setActiveView("sui")}
+          >
+            <FlaskConical size={17} /> Sui
+          </button>
+          <button
             className={activeView === "simulator" ? "active" : ""}
             type="button"
             onClick={() => setActiveView("simulator")}
@@ -1338,33 +1646,50 @@ export default function Dashboard() {
       <main className="main">
         <header className="topbar" id="overview">
           <div className="page-title">
-            <h1>Give your AI agent a wallet.</h1>
-            <p>
-              AgentWallet lets agents pay, swap, and settle through wallets that
-              owners can actually control.
-            </p>
+            {activeView === "sui" ? (
+              <>
+                <h1>Sui agent wallet proof.</h1>
+                <p>
+                  Overflow track workspace for Move policy objects, DeepBook orders,
+                  on-chain activity logs, and owner revocation.
+                </p>
+              </>
+            ) : (
+              <>
+                <h1>Give your AI agent a wallet.</h1>
+                <p>
+                  AgentWallet lets agents pay, swap, and settle through wallets that
+                  owners can actually control.
+                </p>
+              </>
+            )}
           </div>
           <div className="top-actions">
-            <span className="status-pill">
-              <KeyRound size={16} /> {policy.status} policy
-            </span>
-            <button
-              className={walletAddress ? "button connected small" : "button secondary small"}
-              type="button"
-              onClick={connectWallet}
-            >
-              <WalletCards size={15} />{" "}
-              {walletAddress ? `Connected ${shortAddress(walletAddress)}` : "Connect wallet"}
-            </button>
+            {activeView === "sui" ? (
+              <span className="status-pill">
+                <FlaskConical size={15} /> Sui autonomous DeepBook proof
+              </span>
+            ) : (
+              <button
+                className={walletAddress ? "button connected small" : "button secondary small"}
+                type="button"
+                onClick={connectWallet}
+              >
+                <WalletCards size={15} />{" "}
+                {walletAddress ? `Connected ${shortAddress(walletAddress)}` : "Connect wallet"}
+              </button>
+            )}
           </div>
         </header>
 
-        <section className="grid metrics" aria-label="Metrics">
-          <Metric label="Daily budget" value={formatUsdMetric(policy.dailyBudgetUsd)} />
-          <Metric label="Remaining today" value={formatUsdMetric(remainingBudget)} />
-          <Metric label="Autonomous limit" value={formatUsdMetric(policy.approvalThresholdUsd)} />
-          <Metric label="Policy violations" value={String(deniedEvents.length)} />
-        </section>
+        {activeView !== "sui" ? (
+          <section className="grid metrics" aria-label="Metrics">
+            <Metric label="Daily budget" value={formatUsdMetric(policy.dailyBudgetUsd)} />
+            <Metric label="Remaining today" value={formatUsdMetric(remainingBudget)} />
+            <Metric label="Autonomous limit" value={formatUsdMetric(policy.approvalThresholdUsd)} />
+            <Metric label="Policy violations" value={String(deniedEvents.length)} />
+          </section>
+        ) : null}
 
         {activeView === "operations" ? (
           <OperationsView
@@ -1433,20 +1758,43 @@ export default function Dashboard() {
             latestProvisionedApiKey={latestProvisionedApiKey}
             telegramLinkCode={telegramLinkCode}
             telegramLinkStatus={telegramLinkStatus}
+            ownerExportPasswordSet={ownerExportPasswordSet}
+            exportPassword={exportPassword}
+            exportStatus={exportStatus}
+            exportedAgentWallet={exportedAgentWallet}
+            approvalRequests={approvalRequests}
+            approvalStatus={approvalStatus}
+            approvePaymentRequest={approvePaymentRequest}
+            rejectPaymentRequest={rejectPaymentRequest}
             signInOwnerWallet={signInOwnerWallet}
             createHostedAgent={createHostedAgent}
             rotateHostedAgentApiKey={rotateHostedAgentApiKey}
             createHostedAgentTelegramLink={createHostedAgentTelegramLink}
             unlinkHostedAgentTelegram={unlinkHostedAgentTelegram}
+            setOwnerRecoveryPassword={setOwnerRecoveryPassword}
+            exportHostedAgentWallet={exportHostedAgentWallet}
             loadProvisionedAgentIntoPolicy={loadProvisionedAgentIntoPolicy}
             clearHostedAgentSelection={clearHostedAgentSelection}
             setNewAgentName={setNewAgentName}
+            setExportPassword={setExportPassword}
           />
+        ) : activeView === "sui" ? (
+          <SuiView />
         ) : activeView === "simulator" ? (
           <SimulatorView findings={simulatorFindings} />
         ) : (
           <AuditLogView events={displayedAuditEvents} />
         )}
+        {pendingApprovalToast ? (
+          <ApprovalToast
+            approval={pendingApprovalToast}
+            onApprove={approvePaymentRequest}
+            onReject={rejectPaymentRequest}
+            onDismiss={(approvalId) =>
+              setDismissedApprovalToastIds((current) => [...current, approvalId])
+            }
+          />
+        ) : null}
       </main>
     </div>
   );
@@ -1518,14 +1866,25 @@ function OperationsView({
   latestProvisionedApiKey,
   telegramLinkCode,
   telegramLinkStatus,
+  ownerExportPasswordSet,
+  exportPassword,
+  exportStatus,
+  exportedAgentWallet,
+  approvalRequests,
+  approvalStatus,
+  approvePaymentRequest,
+  rejectPaymentRequest,
   signInOwnerWallet,
   createHostedAgent,
   rotateHostedAgentApiKey,
   createHostedAgentTelegramLink,
   unlinkHostedAgentTelegram,
+  setOwnerRecoveryPassword,
+  exportHostedAgentWallet,
   loadProvisionedAgentIntoPolicy,
   clearHostedAgentSelection,
-  setNewAgentName
+  setNewAgentName,
+  setExportPassword
 }: {
   agentTokenAccount: string | null;
   anchorSignature: string | null;
@@ -1592,14 +1951,25 @@ function OperationsView({
   latestProvisionedApiKey: string | null;
   telegramLinkCode: string | null;
   telegramLinkStatus: string;
+  ownerExportPasswordSet: boolean;
+  exportPassword: string;
+  exportStatus: string;
+  exportedAgentWallet: ExportedAgentWallet | null;
+  approvalRequests: AgentApproval[];
+  approvalStatus: string;
+  approvePaymentRequest: (approval: AgentApproval) => void;
+  rejectPaymentRequest: (approval: AgentApproval) => void;
   signInOwnerWallet: () => void;
   createHostedAgent: () => void;
   rotateHostedAgentApiKey: (agentId: string) => void;
   createHostedAgentTelegramLink: (agentId: string) => void;
   unlinkHostedAgentTelegram: (agentId: string) => void;
+  setOwnerRecoveryPassword: () => void;
+  exportHostedAgentWallet: (agentId: string) => void;
   loadProvisionedAgentIntoPolicy: (agent: ProvisionedAgent) => void;
   clearHostedAgentSelection: () => void;
   setNewAgentName: Dispatch<SetStateAction<string>>;
+  setExportPassword: Dispatch<SetStateAction<string>>;
 }) {
   const displayedPolicyPda = policyPda ?? activeDerivedPolicyPda;
   const canInitializePolicy = Boolean(displayedPolicyPda) && policyAccountStatus === "missing";
@@ -1762,10 +2132,12 @@ function OperationsView({
               className="button"
               type="button"
               onClick={createHostedAgent}
-              disabled={!walletAddress || !newAgentName.trim()}
+              disabled={!walletAddress || !ownerExportPasswordSet || !newAgentName.trim()}
               title={
                 !walletAddress
                   ? "Connect and sign with the owner wallet first."
+                  : !ownerExportPasswordSet
+                    ? "Set the owner recovery password before creating hosted wallets."
                   : !newAgentName.trim()
                     ? "Enter an agent name first."
                     : "Generate a hosted wallet and API key for this agent."
@@ -1853,6 +2225,67 @@ function OperationsView({
               </div>
             )}
           </div>
+          <div className="devnet-card wallet-export-card" style={{ marginTop: 14 }}>
+            <div>
+              <span className="eyebrow">Advanced recovery</span>
+              <strong>Owner recovery password</strong>
+              <p>
+                Set one password before creating hosted wallets. The same password lets the
+                owner reveal any hosted agent wallet key later, similar to a wallet app password.
+              </p>
+            </div>
+            <div className="policy-form">
+              <PasswordField
+                label="Owner recovery password"
+                help={
+                  ownerExportPasswordSet
+                    ? "Enter this password to reveal the selected hosted wallet key."
+                    : "Set this once before creating hosted wallets. AgentWallet stores only a password hash."
+                }
+                value={exportPassword}
+                className="span-2"
+                onChange={setExportPassword}
+              />
+            </div>
+            <div className="button-row" style={{ marginTop: 12 }}>
+              <button
+                className="button secondary"
+                type="button"
+                disabled={!walletAddress || ownerExportPasswordSet || !exportPassword.trim()}
+                onClick={setOwnerRecoveryPassword}
+              >
+                <KeyRound size={17} /> {ownerExportPasswordSet ? "Recovery password set" : "Set recovery password"}
+              </button>
+              <button
+                className="button secondary"
+                type="button"
+                disabled={!selectedProvisionedAgent || !ownerExportPasswordSet || !exportPassword.trim()}
+                onClick={() =>
+                  selectedProvisionedAgent
+                    ? exportHostedAgentWallet(selectedProvisionedAgent.id)
+                    : undefined
+                }
+              >
+                <AlertTriangle size={17} /> Reveal selected wallet key
+              </button>
+            </div>
+            <p className="inline-status warning">
+              <AlertTriangle size={15} /> {exportStatus}
+            </p>
+            {exportedAgentWallet ? (
+              <div className="export-result">
+                <ReadOnlyField label="Public key" value={exportedAgentWallet.publicKey} />
+                <div className="field span-2">
+                  <label>Private key (base58)</label>
+                  <CopyField value={exportedAgentWallet.secretKeyBase58} label="Copy base58 private key" />
+                </div>
+                <div className="field span-2">
+                  <label>Private key byte array</label>
+                  <CopyField value={JSON.stringify(exportedAgentWallet.secretKeyBytes)} label="Copy byte array private key" />
+                </div>
+              </div>
+            ) : null}
+          </div>
           <AgentSdkPanel
             agentApiKey={agentApiKey}
             executePaymentForm={executePaymentForm}
@@ -1860,25 +2293,6 @@ function OperationsView({
             selectedProvisionedAgent={selectedProvisionedAgent}
           />
           <div className="setup-grid advanced-only" style={{ marginTop: 14 }}>
-            <div className="event">
-              <header>
-                <strong>AgentWallet SDK</strong>
-                <KeyRound size={16} color="var(--cyan)" />
-              </header>
-              <p>Agents call the hosted wallet API with their API key. Private keys stay encrypted server-side.</p>
-              <pre className="code-panel">{`import { AgentWallet } from "@agentwallet/sdk";
-
-const wallet = new AgentWallet({
-  baseUrl: "${sdkBaseUrlExample}",
-  apiKey: "${agentApiKey || "<agent-api-key>"}"
-});
-
-await wallet.pay({
-  recipient: "${executePaymentForm.recipient || "<recipient-public-key>"}",
-  amount: "${executePaymentForm.amount}",
-  tokenMint: "${onchainPolicyForm.tokenMint}"
-});`}</pre>
-            </div>
             <div className="event">
               <header>
                 <strong>x402 paid API demo</strong>
@@ -2148,7 +2562,7 @@ await wallet.pay({
             />
             <TokenCatalogField
               label="Tokens the agent can spend"
-              help="Add Solana devnet SPL token names and mint/contract addresses. Checked tokens are saved for this agent; the active token is used when publishing policy and running payment tests."
+              help="Add Solana devnet SPL token names and mint/contract addresses. Checked tokens are written into the on-chain allowlist; the active token is the default used by simple tests and Telegram."
               activeValue={onchainPolicyForm.tokenMint}
               items={tokenCatalog}
               className="span-2"
@@ -2306,6 +2720,84 @@ await wallet.pay({
           </div>
         </section>
 
+        <section className="panel">
+          <h2>Owner approvals</h2>
+          <p className="section-note">
+            Payments above the autonomous threshold pause here. The owner signs an on-chain payment intent, then AgentWallet executes the approved payment automatically.
+          </p>
+          <p className="inline-status">
+            <Info size={15} /> {approvalStatus}
+          </p>
+          <div className="agent-table approval-table" style={{ marginTop: 14 }}>
+            <div className="agent-table-row header">
+              <span>Payment</span>
+              <span>Recipient</span>
+              <span>Status</span>
+              <span>Actions</span>
+            </div>
+            {approvalRequests.length ? (
+              approvalRequests.map((approval) => (
+                <div className="agent-table-row" key={approval.id}>
+                  <span>
+                    <strong>{approval.amount} token</strong>
+                    <small>{shortAddress(approval.tokenMint)}</small>
+                  </span>
+                  <span title={approval.recipient}>{shortAddress(approval.recipient)}</span>
+                  <span>
+                    <span className={`registry-status ${
+                      approval.status === "approved" || approval.status === "executed"
+                        ? "initialized"
+                        : approval.status === "pending"
+                          ? "draft"
+                          : "blocked"
+                    }`}>
+                      {approval.status}
+                    </span>
+                  </span>
+                  <div className="button-row compact">
+                    {approval.status === "pending" ? (
+                      <>
+                        <button
+                          className="button small"
+                          type="button"
+                          onClick={() => approvePaymentRequest(approval)}
+                        >
+                          <ShieldCheck size={15} /> Approve
+                        </button>
+                        <button
+                          className="button secondary small"
+                          type="button"
+                          onClick={() => rejectPaymentRequest(approval)}
+                        >
+                          <X size={15} /> Reject
+                        </button>
+                      </>
+                    ) : null}
+                    {approval.approvalSignature ? (
+                      <a
+                        className="icon-button ghost"
+                        href={getExplorerTransactionUrl(approval.approvalSignature)}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label="View approval transaction"
+                      >
+                        <ExternalLink size={15} />
+                      </a>
+                    ) : null}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="agent-table-row">
+                <span>No pending approvals.</span>
+                <span />
+                <span />
+                <span />
+              </div>
+            )}
+          </div>
+        </section>
+
         <section className="panel advanced-only">
           <h2>Agent API integration</h2>
           <div className="devnet-card">
@@ -2412,6 +2904,14 @@ function AgentSdkPanel({
   onchainPolicyForm: typeof defaultOnchainPolicyForm;
   selectedProvisionedAgent: ProvisionedAgent | null;
 }) {
+  const apiKeyValue = agentApiKey || "AGENTWALLET_API_KEY_FROM_DASHBOARD";
+  const agentName = selectedProvisionedAgent?.name ?? "No agent selected";
+  const agentWallet = selectedProvisionedAgent?.publicKey ?? "Select a hosted agent first";
+  const policyPda = selectedProvisionedAgent?.policyPda ?? "Publish policy after selecting an agent";
+  const recipient = executePaymentForm.recipient || "<allowed-recipient-wallet>";
+  const amount = executePaymentForm.amount || "1";
+  const tokenMint = onchainPolicyForm.tokenMint || "<allowed-token-mint>";
+  const envSnippet = `AGENTWALLET_API_KEY=${apiKeyValue}`;
   const sdkSnippet = `import { AgentWallet } from "@agentwallet/sdk";
 
 const wallet = new AgentWallet({
@@ -2420,44 +2920,1569 @@ const wallet = new AgentWallet({
 });
 
 const me = await wallet.getAgent();
-if (!me.status.readyForPayments) {
-  throw new Error("AgentWallet setup incomplete: " + me.status.missing.join(", "));
-}
+console.log("Agent wallet:", me.agent.publicKey);
 
 await wallet.pay({
-  recipient: "${executePaymentForm.recipient || "<recipient-public-key>"}",
-  amount: "${executePaymentForm.amount || "1"}"${
-    onchainPolicyForm.tokenMint ? `,
-  tokenMint: "${onchainPolicyForm.tokenMint}"` : ""
-  }
+  recipient: "${recipient}",
+  amount: "${amount}",
+  tokenMint: "${tokenMint}"
 });`;
+  const restSnippet = `curl -X POST "${sdkBaseUrlExample}/api/agent-wallet/pay" \\
+  -H "Authorization: Bearer $AGENTWALLET_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "recipient": "${recipient}",
+    "amount": "${amount}",
+    "tokenMint": "${tokenMint}"
+  }'`;
 
   return (
-    <div className="devnet-card sdk-card" style={{ marginTop: 14 }}>
-      <div>
-        <span className="eyebrow">Use from your AI agent</span>
-        <strong>{selectedProvisionedAgent ? selectedProvisionedAgent.name : "Select a hosted agent"}</strong>
+    <div className="devnet-card sdk-handoff-card" style={{ marginTop: 14 }}>
+      <div className="sdk-handoff-header">
+        <div>
+          <span className="eyebrow">Give this to your AI agent</span>
+          <strong>AgentWallet SDK/API access</strong>
+          <p>
+            Your agent gets a scoped API key, not the private key. Every spend still
+            routes through the owner policy and on-chain AgentWallet program.
+          </p>
+        </div>
+        <div className="sdk-agent-pill">
+          <span>{agentName}</span>
+          <strong>{selectedProvisionedAgent ? shortAddress(selectedProvisionedAgent.publicKey) : "No wallet"}</strong>
+        </div>
       </div>
-      <p>
-        Telegram is only one interface. A real AI agent should call AgentWallet through
-        the SDK or REST API using its hosted agent API key.
-      </p>
-      <pre className="code-panel">{sdkSnippet}</pre>
-      <div className="button-row">
-        <button
-          className="button secondary"
-          type="button"
-          onClick={() => void navigator.clipboard?.writeText(sdkSnippet)}
-        >
-          <KeyRound size={17} /> Copy SDK snippet
-        </button>
-        <a className="button secondary" href="/docs" target="_blank" rel="noreferrer">
-          <ExternalLink size={17} /> Agent docs
-        </a>
+
+      <div className="sdk-grid">
+        <div className="sdk-highlight">
+          <span>Hosted wallet</span>
+          <strong>{agentWallet}</strong>
+        </div>
+        <div className="sdk-highlight">
+          <span>Policy account</span>
+          <strong>{policyPda}</strong>
+        </div>
+        <div className="sdk-highlight">
+          <span>Default token</span>
+          <strong>{tokenMint}</strong>
+        </div>
+      </div>
+
+      <div className="sdk-copy-section">
+        <span className="eyebrow">Environment variable for the agent</span>
+        <CopyField value={envSnippet} label="Copy AgentWallet API key env variable" />
+        <p>
+          Paste this into your agent runtime secret store. If the full key is not shown,
+          rotate the selected agent API key and copy the new one-time value.
+        </p>
+      </div>
+
+      <div className="sdk-code-grid">
+        <div>
+          <span className="eyebrow">TypeScript SDK</span>
+          <pre className="code-panel">{sdkSnippet}</pre>
+          <div className="button-row">
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => void navigator.clipboard?.writeText(sdkSnippet)}
+            >
+              <KeyRound size={17} /> Copy SDK snippet
+            </button>
+          </div>
+        </div>
+        <div>
+          <span className="eyebrow">REST fallback</span>
+          <pre className="code-panel">{restSnippet}</pre>
+          <div className="button-row">
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => void navigator.clipboard?.writeText(restSnippet)}
+            >
+              <Copy size={17} /> Copy REST call
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="sdk-guardrails">
+        <span>Your agent can request payments.</span>
+        <span>AgentWallet signs only if policy allows it.</span>
+        <span>Owners can pause, rotate, or export wallets.</span>
+      </div>
+
+      <a className="explorer-link" href="/docs" target="_blank" rel="noreferrer">
+        <ExternalLink size={15} /> Read AgentWallet integration docs
+      </a>
+    </div>
+  );
+}
+
+function SuiView() {
+  const [config, setConfig] = useState<SuiDashboardConfig>(() => applySuiDeepBookMarket(null, "deep-sui-testnet"));
+  const [activityEvents, setActivityEvents] = useState<SuiActivityEvent[]>([]);
+  const [activityStatus, setActivityStatus] = useState("Enter a Sui package id, then fetch testnet activity.");
+  const [isFetchingActivity, setIsFetchingActivity] = useState(false);
+  const [deepBookOrders, setDeepBookOrders] = useState<SuiDeepBookOrder[]>([]);
+  const [deepBookOrderStatus, setDeepBookOrderStatus] = useState("Run the agent strategy, then refresh DeepBook orders.");
+  const [isFetchingDeepBookOrders, setIsFetchingDeepBookOrders] = useState(false);
+  const [isSubmittingSuiAction, setIsSubmittingSuiAction] = useState(false);
+  const [isRunningSuiDemo, setIsRunningSuiDemo] = useState(false);
+  const [suiDemoProgress, setSuiDemoProgress] = useState<string[]>([]);
+  const [suiActionStatus, setSuiActionStatus] = useState("Unlock local Sui wallets to run owner actions from the dashboard.");
+  const [suiActionExplorerUrl, setSuiActionExplorerUrl] = useState<string | null>(null);
+  const [suiMandate, setSuiMandate] = useState("max 0.5 SUI, DeepBook only, expires 24h");
+  const [passwordConfirmed, setPasswordConfirmed] = useState(false);
+  const [fundingConfirmed, setFundingConfirmed] = useState(false);
+  const [mandateApplied, setMandateApplied] = useState(false);
+  const [ownerSuiBalance, setOwnerSuiBalance] = useState("0");
+  const [agentSuiBalance, setAgentSuiBalance] = useState("0");
+  const [balanceStatus, setBalanceStatus] = useState("Generate wallets, then check their Sui testnet balances.");
+  const [isFetchingBalances, setIsFetchingBalances] = useState(false);
+  const parsedSuiMandate = useMemo(() => parseSuiAgentMandate(suiMandate), [suiMandate]);
+  const selectedSuiMarketId = useMemo(() => findSuiDeepBookMarketId(config), [config]);
+  const [encryptedSuiWallets, setEncryptedSuiWallets] = useState<EncryptedSuiLocalWalletBundle | null>(null);
+  const [unlockedSuiWallets, setUnlockedSuiWallets] = useState<SuiLocalWalletBundle | null>(null);
+  const [suiWalletPassword, setSuiWalletPassword] = useState("");
+  const [suiWalletStatus, setSuiWalletStatus] = useState(
+    "Create a local Sui owner and agent wallet for the Overflow demo path."
+  );
+
+  useEffect(() => {
+    const savedConfig = window.localStorage.getItem(suiDashboardStorageKey);
+    const savedWallets = window.localStorage.getItem(suiLocalWalletStorageKey);
+
+    if (savedConfig) {
+      try {
+        const parsedConfig = normalizeSuiDashboardConfig(JSON.parse(savedConfig));
+        setConfig(
+          parsedConfig.allowedPoolId || parsedConfig.deepbookPackageId
+            ? parsedConfig
+            : applySuiDeepBookMarket(parsedConfig, "deep-sui-testnet")
+        );
+      } catch {
+        setActivityStatus("Saved Sui config could not be read. Enter object ids again.");
+      }
+    }
+
+    if (savedWallets) {
+      try {
+        const parsedWallets = JSON.parse(savedWallets) as EncryptedSuiLocalWalletBundle;
+        setEncryptedSuiWallets(parsedWallets);
+        setPasswordConfirmed(true);
+        setSuiWalletStatus("Encrypted Sui wallets found. Enter the password to unlock private keys.");
+      } catch {
+        setSuiWalletStatus("Saved Sui wallets could not be read. Generate a new local pair.");
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(suiDashboardStorageKey, JSON.stringify(config));
+  }, [config]);
+
+  function updateConfig(key: keyof SuiDashboardConfig, value: string) {
+    setConfig((current) => normalizeSuiDashboardConfig({ ...current, [key]: value }));
+  }
+
+  async function generateLocalSuiWallets() {
+    try {
+      const bundle = generateSuiLocalWalletBundle();
+      const encrypted = await encryptSuiLocalWalletBundle(bundle, suiWalletPassword);
+      window.localStorage.setItem(suiLocalWalletStorageKey, JSON.stringify(encrypted));
+      setEncryptedSuiWallets(encrypted);
+      setUnlockedSuiWallets(bundle);
+      setFundingConfirmed(false);
+      setConfig((current) => normalizeSuiDashboardConfig({ ...current, agentAddress: bundle.agent.address }));
+      setSuiWalletStatus(
+        "Local Sui owner and agent wallets generated. Fund both addresses on Sui testnet before running commands."
+      );
+    } catch (error) {
+      setSuiWalletStatus(getErrorMessage(error));
+    }
+  }
+
+  async function unlockLocalSuiWallets() {
+    if (!encryptedSuiWallets) {
+      setSuiWalletStatus("Generate Sui wallets before unlocking.");
+      return;
+    }
+
+    try {
+      const bundle = await decryptSuiLocalWalletBundle(encryptedSuiWallets, suiWalletPassword);
+      setUnlockedSuiWallets(bundle);
+      setConfig((current) => normalizeSuiDashboardConfig({ ...current, agentAddress: bundle.agent.address }));
+      setSuiWalletStatus("Sui wallets unlocked locally. Private keys are available below for CLI setup.");
+    } catch (error) {
+      setSuiWalletStatus(getErrorMessage(error));
+    }
+  }
+
+  async function fetchSuiActivity(configOverride?: unknown) {
+    const activityConfig = resolveSuiActivityConfig(configOverride, config);
+
+    if (!activityConfig.packageId.trim()) {
+      setActivityStatus("Sui package id is required before fetching activity.");
+      return;
+    }
+
+    try {
+      setIsFetchingActivity(true);
+      setActivityStatus("Fetching Sui testnet activity...");
+      const response = await fetch("/api/sui/activity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(activityConfig)
+      });
+      const payload = await readJsonResponse<{ events: SuiActivityEvent[] }>(response);
+      setActivityEvents(payload.events);
+      const nextConfig = mergeSuiActivityIntoConfig(activityConfig, payload.events);
+      setConfig(nextConfig);
+      setActivityStatus(
+        payload.events.length
+          ? `Fetched ${payload.events.length} Sui event${payload.events.length === 1 ? "" : "s"}.`
+          : "No matching AgentWallet Sui events found for these object ids yet."
+      );
+      if (
+        nextConfig.lastDeepBookTransactionDigest &&
+        nextConfig.deepbookPackageId &&
+        nextConfig.balanceManagerId &&
+        nextConfig.allowedPoolId
+      ) {
+        await fetchDeepBookOrders(nextConfig);
+      }
+    } catch (error) {
+      setActivityStatus(getErrorMessage(error));
+    } finally {
+      setIsFetchingActivity(false);
+    }
+  }
+
+  async function fetchDeepBookOrders(configOverride = config) {
+    if (
+      !configOverride.deepbookPackageId.trim() ||
+      !configOverride.balanceManagerId.trim() ||
+      !configOverride.allowedPoolId.trim()
+    ) {
+      setDeepBookOrderStatus("DeepBook package, pool, and balance manager IDs are required.");
+      return;
+    }
+
+    try {
+      setIsFetchingDeepBookOrders(true);
+      setDeepBookOrderStatus("Fetching DeepBook order events...");
+      const response = await fetch("/api/sui/deepbook-orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deepbookPackageId: configOverride.deepbookPackageId,
+          balanceManagerId: configOverride.balanceManagerId,
+          poolId: configOverride.allowedPoolId,
+          marketLabel: "DEEP / SUI",
+          transactionDigest: configOverride.lastDeepBookTransactionDigest
+        })
+      });
+      const payload = await readJsonResponse<{ orders: SuiDeepBookOrder[] }>(response);
+      setDeepBookOrders(payload.orders);
+      setDeepBookOrderStatus(
+        payload.orders.length
+          ? `Loaded ${payload.orders.length} DeepBook order${payload.orders.length === 1 ? "" : "s"}.`
+          : "No matching DeepBook order events found yet."
+      );
+    } catch (error) {
+      setDeepBookOrderStatus(getErrorMessage(error));
+    } finally {
+      setIsFetchingDeepBookOrders(false);
+    }
+  }
+
+  function applySuiMandateToConfig() {
+    const now = Date.now();
+    setConfig((current) =>
+      normalizeSuiDashboardConfig({
+        ...current,
+        budgetMist: parsedSuiMandate.maxBudget,
+        expiresAtMs: String(now + Number(parsedSuiMandate.expiresAtMs)),
+        spendAmount: current.spendAmount || "1000000"
+      })
+    );
+    setSuiActionStatus(
+      `Mandate applied: max ${parsedSuiMandate.budgetLabel}, ${parsedSuiMandate.allowedProtocol} only, expires in ${Number(parsedSuiMandate.expiresAtMs) / 3_600_000}h.`
+    );
+    setMandateApplied(true);
+  }
+
+  async function fetchSuiBalances() {
+    if (!encryptedSuiWallets) {
+      setBalanceStatus("Generate the owner and agent wallets first.");
+      return null;
+    }
+
+    try {
+      setIsFetchingBalances(true);
+      setBalanceStatus("Checking Sui testnet balances...");
+      const response = await fetch("/api/sui/balances", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner: encryptedSuiWallets.ownerAddress,
+          agent: encryptedSuiWallets.agentAddress
+        })
+      });
+      const balances = await readJsonResponse<{ ownerBalance: string; agentBalance: string }>(response);
+      setOwnerSuiBalance(balances.ownerBalance);
+      setAgentSuiBalance(balances.agentBalance);
+      const readiness = mandateApplied
+        ? getSuiFundingReadiness({
+            ...balances,
+            budgetMist: config.budgetMist,
+            coinType: config.coinType
+          })
+        : getSuiGasReadiness(balances);
+      setBalanceStatus(
+        readiness.ready
+          ? mandateApplied
+            ? "Both wallets have enough SUI for the selected mandate budget and transaction gas."
+            : "Both wallets have enough SUI for transaction gas. Choose the mandate budget next."
+          : `Funding required: owner needs at least ${formatSuiBalance(readiness.requiredOwnerBalance)} SUI and agent needs at least ${formatSuiBalance(readiness.requiredAgentBalance)} SUI.`
+      );
+      return balances;
+    } catch (error) {
+      setBalanceStatus(getErrorMessage(error));
+      return null;
+    } finally {
+      setIsFetchingBalances(false);
+    }
+  }
+
+  async function runSuiAction(action: SuiDashboardActionId) {
+    if (!unlockedSuiWallets) {
+      setSuiActionStatus("Unlock the local Sui wallets before running on-chain actions.");
+      return;
+    }
+
+    try {
+      setIsSubmittingSuiAction(true);
+      setSuiActionExplorerUrl(null);
+      const isAgentAction = action === "create-balance-manager" || action === "run-deepbook-strategy";
+      setSuiActionStatus(
+        isAgentAction
+          ? "Agent is autonomously submitting the Sui strategy transaction..."
+          : "Owner is submitting Sui policy transaction..."
+      );
+      const result = await submitSuiDashboardAction({
+        action,
+        config,
+        privateKey: isAgentAction ? unlockedSuiWallets.agent.privateKey : unlockedSuiWallets.owner.privateKey
+      });
+
+      if (!result.ok) {
+        setSuiActionExplorerUrl(result.explorerUrl ?? null);
+        setSuiActionStatus(result.error);
+        return;
+      }
+
+      const nextConfig = normalizeSuiDashboardConfig({
+        ...mergeSuiActionResultIntoConfig(config, result),
+        lastDeepBookTransactionDigest:
+          action === "run-deepbook-strategy"
+            ? result.digest
+            : config.lastDeepBookTransactionDigest
+      });
+      setConfig(nextConfig);
+      setSuiActionExplorerUrl(result.explorerUrl);
+      setSuiActionStatus(
+        isAgentAction
+          ? `Agent strategy confirmed on Sui testnet: ${result.digest}.`
+          : `Owner policy transaction confirmed on Sui testnet: ${result.digest}.`
+      );
+      await fetchSuiActivity(nextConfig);
+      if (action === "run-deepbook-strategy") {
+        await fetchDeepBookOrders(nextConfig);
+      }
+    } catch (error) {
+      setSuiActionStatus(getErrorMessage(error));
+    } finally {
+      setIsSubmittingSuiAction(false);
+    }
+  }
+
+  async function runSuiAutonomousDemo() {
+    if (!unlockedSuiWallets) {
+      setSuiActionStatus("Unlock the local Sui wallets before running the autonomous proof.");
+      return;
+    }
+
+    if (!config.packageId.trim() || !config.agentAddress.trim() || !config.allowedPoolId.trim()) {
+      setSuiActionStatus("Enter the AgentWallet package ID and use a verified DeepBook market before running the proof.");
+      return;
+    }
+
+    const latestBalances = await fetchSuiBalances();
+    if (!latestBalances) {
+      setSuiActionStatus("Unable to verify wallet balances before launch.");
+      return;
+    }
+    const readiness = getSuiFundingReadiness({
+      ...latestBalances,
+      budgetMist: config.budgetMist,
+      coinType: config.coinType
+    });
+    if (!readiness.ready) {
+      setSuiActionStatus(
+        `Launch blocked before signing: owner needs at least ${formatSuiBalance(readiness.requiredOwnerBalance)} SUI for the vault budget plus gas, and agent needs at least ${formatSuiBalance(readiness.requiredAgentBalance)} SUI for gas.`
+      );
+      return;
+    }
+
+    let currentConfig = config;
+    const progress: string[] = [];
+    const vaultFunded =
+      suiDemoProgress.some((entry) => entry.includes("Vault funding confirmed")) ||
+      activityEvents.some((event) => event.type === "AgentVaultFunded")
+        ? true
+        : suiDemoProgress.some((entry) => entry.includes("Agent vault creation confirmed")) ||
+            activityEvents.some((event) => event.type === "AgentVaultCreated")
+          ? false
+          : undefined;
+    const steps = buildSuiAutonomousDemoSteps(currentConfig, {
+      vaultFunded
+    });
+
+    try {
+      setIsRunningSuiDemo(true);
+      setIsSubmittingSuiAction(true);
+      setSuiActionExplorerUrl(null);
+      setSuiDemoProgress([]);
+
+      for (const step of steps) {
+        if (step === "prove-budget-ceiling") {
+          setSuiActionStatus("Agent is attempting an over-budget strategy to prove the Move ceiling...");
+          const rejected = await submitSuiDashboardAction({
+            action: "run-deepbook-strategy",
+            config: buildSuiOverBudgetConfig(currentConfig),
+            privateKey: unlockedSuiWallets.agent.privateKey
+          });
+
+          if (rejected.ok) {
+            setSuiActionExplorerUrl(rejected.explorerUrl);
+            throw new Error("Budget proof failed: the deliberately over-budget transaction unexpectedly succeeded.");
+          }
+
+          progress.push(`Budget ceiling enforced on-chain: ${rejected.error}`);
+          setSuiDemoProgress([...progress]);
+          continue;
+        }
+
+        const isAgentAction = step === "create-balance-manager" || step === "run-deepbook-strategy";
+        setSuiActionStatus(`${suiDemoStepLabel(step)}...`);
+        const result = await submitSuiDashboardAction({
+          action: step,
+          config: currentConfig,
+          privateKey: isAgentAction ? unlockedSuiWallets.agent.privateKey : unlockedSuiWallets.owner.privateKey
+        });
+
+        if (!result.ok) {
+          setSuiActionExplorerUrl(result.explorerUrl ?? null);
+          throw new Error(`${suiDemoStepLabel(step)} failed: ${result.error}`);
+        }
+
+        currentConfig = normalizeSuiDashboardConfig({
+          ...mergeSuiActionResultIntoConfig(currentConfig, result),
+          lastDeepBookTransactionDigest:
+            step === "run-deepbook-strategy"
+              ? result.digest
+              : currentConfig.lastDeepBookTransactionDigest
+        });
+        setConfig(currentConfig);
+        setSuiActionExplorerUrl(result.explorerUrl);
+        progress.push(`${suiDemoStepLabel(step)} confirmed`);
+        setSuiDemoProgress([...progress]);
+      }
+
+      setSuiActionStatus(
+        "Autonomous proof complete: real DeepBook strategy executed and the over-budget action was blocked on-chain. Use Revoke policy for the final owner-control proof."
+      );
+      await fetchSuiActivity(currentConfig);
+      await fetchDeepBookOrders(currentConfig);
+    } catch (error) {
+      setSuiActionStatus(getErrorMessage(error));
+    } finally {
+      setIsSubmittingSuiAction(false);
+      setIsRunningSuiDemo(false);
+    }
+  }
+
+  const suiGasReadiness = getSuiGasReadiness({
+    ownerBalance: ownerSuiBalance,
+    agentBalance: agentSuiBalance
+  });
+  const suiLaunchStage = getSuiLaunchStage({
+    hasPassword: passwordConfirmed,
+    hasWallets: Boolean(encryptedSuiWallets),
+    walletsFunded: fundingConfirmed,
+    unlocked: Boolean(unlockedSuiWallets),
+    mandateApplied,
+    launched: suiDemoProgress.some((entry) => entry.includes("Agent DeepBook strategy confirmed"))
+  });
+
+  return (
+    <SuiGuidedDashboard
+      stage={suiLaunchStage}
+      password={suiWalletPassword}
+      setPassword={setSuiWalletPassword}
+      confirmPassword={() => {
+        if (suiWalletPassword.length < 8) {
+          setSuiWalletStatus("Use at least 8 characters for the local wallet password.");
+          return;
+        }
+        setPasswordConfirmed(true);
+        setSuiWalletStatus("Password ready. Generate the owner and agent wallets.");
+      }}
+      encryptedWallets={encryptedSuiWallets}
+      unlockedWallets={unlockedSuiWallets}
+      generateWallets={generateLocalSuiWallets}
+      unlockWallets={unlockLocalSuiWallets}
+      walletStatus={suiWalletStatus}
+      ownerBalance={ownerSuiBalance}
+      agentBalance={agentSuiBalance}
+      requiredOwnerBalance={suiGasReadiness.requiredOwnerBalance}
+      requiredAgentBalance={suiGasReadiness.requiredAgentBalance}
+      balanceStatus={balanceStatus}
+      fetchBalances={fetchSuiBalances}
+      isFetchingBalances={isFetchingBalances}
+      canContinueFunding={suiGasReadiness.ready}
+      continueFromFunding={() => setFundingConfirmed(true)}
+      mandate={suiMandate}
+      setMandate={(value) => {
+        setSuiMandate(value);
+        setMandateApplied(false);
+      }}
+      parsedMandate={parsedSuiMandate}
+      applyMandate={applySuiMandateToConfig}
+      runProof={runSuiAutonomousDemo}
+      revoke={() => void runSuiAction("revoke-policy")}
+      isRunning={isRunningSuiDemo}
+      actionStatus={suiActionStatus}
+      explorerUrl={suiActionExplorerUrl}
+      progress={suiDemoProgress}
+      config={config}
+      updateConfig={updateConfig}
+      activityEvents={activityEvents}
+      activityStatus={activityStatus}
+      fetchActivity={() => void fetchSuiActivity()}
+      isFetchingActivity={isFetchingActivity}
+      deepBookOrders={deepBookOrders}
+      deepBookOrderStatus={deepBookOrderStatus}
+      fetchDeepBookOrders={() => void fetchDeepBookOrders()}
+      isFetchingDeepBookOrders={isFetchingDeepBookOrders}
+    />
+  );
+
+  return (
+    <section className="grid workspace" style={{ marginTop: 16 }}>
+      <section className="panel span-2">
+        <div className="section-header">
+          <div>
+            <span className="eyebrow">Sui wallet setup</span>
+            <h2>Generate owner and agent wallets</h2>
+          </div>
+          <span className={`registry-status ${unlockedSuiWallets ? "initialized" : "pending"}`}>
+            {unlockedSuiWallets ? "unlocked locally" : encryptedSuiWallets ? "encrypted locally" : "not created"}
+          </span>
+        </div>
+        <p className="section-note">
+          This creates a Sui owner wallet and a separate agent wallet in your browser for testnet demos. AgentWallet
+          encrypts the private keys with your password and stores the encrypted vault only in local storage.
+        </p>
+        <div className="setup-grid" style={{ marginTop: 12 }}>
+          <div className="devnet-card">
+            <span className="eyebrow">Owner wallet</span>
+            <strong>{encryptedSuiWallets ? shortAddress(encryptedSuiWallets?.ownerAddress ?? "") : "Not generated"}</strong>
+            {encryptedSuiWallets ? (
+              <CopyField value={encryptedSuiWallets?.ownerAddress ?? ""} label="Copy Sui owner address" />
+            ) : (
+              <p>Creates and owns the Sui policy object for the Overflow demo.</p>
+            )}
+          </div>
+          <div className="devnet-card">
+            <span className="eyebrow">Agent wallet</span>
+            <strong>{encryptedSuiWallets ? shortAddress(encryptedSuiWallets?.agentAddress ?? "") : "Not generated"}</strong>
+            {encryptedSuiWallets ? (
+              <CopyField value={encryptedSuiWallets?.agentAddress ?? ""} label="Copy Sui agent address" />
+            ) : (
+              <p>This address is allowed to spend from the Move policy vault.</p>
+            )}
+          </div>
+          <div className="devnet-card">
+            <span className="eyebrow">Testnet funding</span>
+            <strong>Fund both Sui addresses</strong>
+            <p>
+              Use the Sui testnet faucet for gas. The owner signs policy actions; the agent signs autonomous strategy
+              transactions.
+            </p>
+            <a className="explorer-link" href="https://faucet.sui.io/" target="_blank" rel="noreferrer">
+              <ExternalLink size={15} /> Open Sui faucet
+            </a>
+          </div>
+        </div>
+        <div className="policy-form" style={{ marginTop: 14 }}>
+          <PasswordField
+            label="Local Sui wallet password"
+            help="Minimum 8 characters. AgentWallet does not store this password."
+            value={suiWalletPassword}
+            onChange={setSuiWalletPassword}
+          />
+        </div>
+        <div className="devnet-card" style={{ marginTop: 14 }}>
+          <span className="eyebrow">One-click Overflow proof</span>
+          <strong>Run the autonomous DeepBook lifecycle</strong>
+          <p>
+            Creates missing policy objects, funds a new vault, lets the agent place a real order, then proves the Move
+            budget ceiling with a rejected over-budget attempt. Owner revocation remains a separate final proof.
+          </p>
+          <div className="button-row" style={{ marginTop: 12 }}>
+            <button
+              className="button"
+              type="button"
+              disabled={isRunningSuiDemo || !unlockedSuiWallets || !config.packageId.trim()}
+              onClick={() => void runSuiAutonomousDemo()}
+            >
+              <PlayCircle size={17} /> {isRunningSuiDemo ? "Running autonomous proof..." : "Run autonomous proof"}
+            </button>
+            <button
+              className="button secondary"
+              type="button"
+              disabled={isSubmittingSuiAction || !unlockedSuiWallets || !config.policyId.trim()}
+              onClick={() => void runSuiAction("revoke-policy")}
+            >
+              <X size={17} /> Revoke policy
+            </button>
+          </div>
+          {suiDemoProgress.length ? (
+            <div className="audit-list" style={{ marginTop: 12 }}>
+              {suiDemoProgress.map((entry, index) => (
+                <div className="audit-item" key={`${entry}-${index}`}>
+                  <CheckCircle2 size={16} />
+                  <span>{entry}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <div className="button-row" style={{ marginTop: 12 }}>
+          <button className="button" type="button" onClick={generateLocalSuiWallets}>
+            <KeyRound size={17} /> {encryptedSuiWallets ? "Replace local Sui wallets" : "Generate Sui wallets"}
+          </button>
+          <button className="button secondary" type="button" disabled={!encryptedSuiWallets} onClick={unlockLocalSuiWallets}>
+            <ShieldCheck size={17} /> Unlock private keys
+          </button>
+        </div>
+        <p className="inline-status">
+          <Info size={15} /> {suiWalletStatus}
+        </p>
+        {unlockedSuiWallets ? (
+          <div className="setup-grid" style={{ marginTop: 12 }}>
+            <div className="devnet-card">
+              <span className="eyebrow">Owner private key</span>
+              <strong>Unlocked for CLI commands</strong>
+              <CopyField value={unlockedSuiWallets?.owner.privateKey ?? ""} label="Copy Sui owner private key" />
+            </div>
+            <div className="devnet-card">
+              <span className="eyebrow">Agent private key</span>
+              <strong>Unlocked for autonomous execution</strong>
+              <CopyField value={unlockedSuiWallets?.agent.privateKey ?? ""} label="Copy Sui agent private key" />
+            </div>
+          </div>
+        ) : null}
+      </section>
+      <section className="panel span-2">
+        <div className="section-header">
+          <div>
+            <span className="eyebrow">Sui autonomous agent mandate</span>
+            <h2>Ask the agent to execute under policy</h2>
+          </div>
+          <span className={`registry-status ${unlockedSuiWallets ? "initialized" : "pending"}`}>
+            {unlockedSuiWallets ? "wallet unlocked" : "unlock required"}
+          </span>
+        </div>
+        <p className="section-note">
+          Model the Overflow requirement directly: the owner gives the AI agent a natural-language mandate, AgentWallet
+          publishes the Move policy, then the agent signs and submits the DeepBook strategy with its own wallet.
+        </p>
+        <div className="policy-form" style={{ marginTop: 14 }}>
+          <label className="field">
+            <span>
+              DeepBook market
+              <small>
+                Choose a verified market to fill the pool, package, coin, base, quote, quantity, and price automatically.
+              </small>
+            </span>
+            <select
+              value={selectedSuiMarketId}
+              onChange={(event) => {
+                if (event.target.value === "custom") {
+                  setConfig((current) =>
+                    normalizeSuiDashboardConfig({
+                      ...current,
+                      allowedPoolId: "",
+                      deepbookPackageId: ""
+                    })
+                  );
+                  setSuiActionStatus("Custom DeepBook market enabled. Enter verified pool and package IDs below.");
+                  return;
+                }
+
+                setConfig((current) => applySuiDeepBookMarket(current, event.target.value));
+                setSuiActionStatus("Verified DeepBook market configuration applied.");
+              }}
+            >
+              {suiDeepBookMarkets.map((market) => (
+                <option key={market.id} value={market.id}>
+                  {market.label} · {market.network}
+                </option>
+              ))}
+              <option value="custom">Custom market settings</option>
+            </select>
+          </label>
+        </div>
+        {selectedSuiMarketId !== "custom" ? (
+          <div className="setup-grid" style={{ marginTop: 12 }}>
+            <div className="devnet-card">
+              <span className="eyebrow">Selected market</span>
+              <strong>{suiDeepBookMarkets.find((market) => market.id === selectedSuiMarketId)?.label}</strong>
+              <p>{suiDeepBookMarkets.find((market) => market.id === selectedSuiMarketId)?.description}</p>
+            </div>
+            <div className="devnet-card">
+              <span className="eyebrow">Pool scope</span>
+              <strong>{shortAddress(config.allowedPoolId)}</strong>
+              <p>This pool object is written into the owner policy as the agent&apos;s allowed protocol scope.</p>
+            </div>
+            <div className="devnet-card">
+              <span className="eyebrow">Order assets</span>
+              <strong>
+                {config.deepbookBaseType.includes("::deep::DEEP") ? "DEEP" : "Base"} / {config.tokenTypeLabel}
+              </strong>
+              <p>Asset Move types and known working testnet order parameters are configured automatically.</p>
+            </div>
+          </div>
+        ) : null}
+        <div className="policy-form" style={{ marginTop: 14 }}>
+          <EditableField
+            label="Owner instruction to AI agent"
+            help="Example: max 500 USDC, DeepBook only, expires 24h."
+            value={suiMandate}
+            onChange={setSuiMandate}
+          />
+        </div>
+        <div className="setup-grid" style={{ marginTop: 12 }}>
+          <div className="devnet-card">
+            <span className="eyebrow">Budget ceiling</span>
+            <strong>{parsedSuiMandate.budgetLabel}</strong>
+            <p>Stored as {parsedSuiMandate.maxBudget} base units in the Move policy.</p>
+          </div>
+          <div className="devnet-card">
+            <span className="eyebrow">Protocol scope</span>
+            <strong>{parsedSuiMandate.allowedProtocol} only</strong>
+            <p>The allowed pool object constrains where the agent can spend.</p>
+          </div>
+          <div className="devnet-card">
+            <span className="eyebrow">Expiry</span>
+            <strong>{Number(parsedSuiMandate.expiresAtMs) / 3_600_000} hours</strong>
+            <p>Applied as an absolute timestamp when you create the policy.</p>
+          </div>
+        </div>
+        <div className="button-row" style={{ marginTop: 12 }}>
+          <button className="button secondary" type="button" onClick={applySuiMandateToConfig}>
+            <Bot size={17} /> Apply mandate
+          </button>
+          <button
+            className="button"
+            type="button"
+            disabled={isSubmittingSuiAction || !unlockedSuiWallets}
+            onClick={() => void runSuiAction("create-policy")}
+          >
+            <ShieldCheck size={17} /> Create policy
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            disabled={isSubmittingSuiAction || !unlockedSuiWallets || !config.policyId.trim()}
+            onClick={() => void runSuiAction("create-vault")}
+          >
+            <WalletCards size={17} /> Create vault
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            disabled={isSubmittingSuiAction || !unlockedSuiWallets || !config.vaultId.trim()}
+            onClick={() => void runSuiAction("fund-vault")}
+          >
+            <CircleDollarSign size={17} /> Fund vault
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            disabled={isSubmittingSuiAction || !unlockedSuiWallets || !config.deepbookPackageId.trim()}
+            onClick={() => void runSuiAction("create-balance-manager")}
+          >
+            <Bot size={17} /> Agent creates DeepBook manager
+          </button>
+          <button
+            className="button"
+            type="button"
+            disabled={
+              isSubmittingSuiAction ||
+              !unlockedSuiWallets ||
+              !config.policyId.trim() ||
+              !config.vaultId.trim() ||
+              !config.balanceManagerId.trim() ||
+              !config.allowedPoolId.trim() ||
+              !config.deepbookPackageId.trim() ||
+              !config.coinType.trim() ||
+              !config.deepbookBaseType.trim() ||
+              !config.deepbookQuoteType.trim()
+            }
+            onClick={() => void runSuiAction("run-deepbook-strategy")}
+          >
+            <Activity size={17} /> Agent runs DeepBook strategy
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            disabled={isSubmittingSuiAction || !unlockedSuiWallets || !config.policyId.trim()}
+            onClick={() => void runSuiAction("revoke-policy")}
+          >
+            <X size={17} /> Revoke policy
+          </button>
+        </div>
+        <p className="inline-status">
+          <Info size={15} /> {suiActionStatus}
+        </p>
+        {suiActionExplorerUrl ? (
+          <a className="explorer-link" href={suiActionExplorerUrl ?? undefined} target="_blank" rel="noreferrer">
+            <ExternalLink size={15} /> View Sui transaction
+          </a>
+        ) : null}
+      </section>
+      <section className="panel span-2">
+        <div className="section-header">
+          <div>
+            <span className="eyebrow">Sui testnet workspace</span>
+            <h2>Object IDs and proof state</h2>
+          </div>
+          <span className="registry-status pending">saved locally</span>
+        </div>
+        <p className="section-note">
+          Paste the Sui testnet IDs after publishing the Move package and creating the policy/vault.
+          AgentWallet stores these values in browser local storage and uses them to generate commands
+          and fetch the on-chain event trail.
+        </p>
+        <div className="policy-form">
+          <EditableField
+            label="Sui package ID"
+            help="The package id returned by publishing sui/agent_wallet."
+            value={config.packageId}
+            onChange={(value) => updateConfig("packageId", value)}
+          />
+          <EditableField
+            label="Policy object ID"
+            help="The AgentPolicy object created by the owner."
+            value={config.policyId}
+            onChange={(value) => updateConfig("policyId", value)}
+          />
+          <EditableField
+            label="Vault object ID"
+            help="The AgentVault object bound to the agent."
+            value={config.vaultId}
+            onChange={(value) => updateConfig("vaultId", value)}
+          />
+          <EditableField
+            label="Agent address"
+            help="The Sui address allowed to execute from the policy vault."
+            value={config.agentAddress}
+            onChange={(value) => updateConfig("agentAddress", value)}
+          />
+          <EditableField
+            label="DeepBook pool ID"
+            help="The allowed DeepBook pool object id for the agent strategy."
+            value={config.allowedPoolId}
+            onChange={(value) => updateConfig("allowedPoolId", value)}
+          />
+          <EditableField
+            label="Balance manager ID"
+            help="The DeepBook balance manager used by the agent order plan."
+            value={config.balanceManagerId}
+            onChange={(value) => updateConfig("balanceManagerId", value)}
+          />
+          <EditableField
+            label="DeepBook package ID"
+            help="The DeepBook package id used by the testnet order plan."
+            value={config.deepbookPackageId}
+            onChange={(value) => updateConfig("deepbookPackageId", value)}
+          />
+          <EditableField
+            label="Vault coin type"
+            help="Move coin type held by the AgentWallet vault, for example 0x2::sui::SUI or a testnet USDC type."
+            value={config.coinType}
+            onChange={(value) => updateConfig("coinType", value)}
+          />
+          <EditableField
+            label="Token label"
+            help="Human-readable token label stored in the vault event, for example SUI or USDC."
+            value={config.tokenTypeLabel}
+            onChange={(value) => updateConfig("tokenTypeLabel", value)}
+          />
+          <EditableField
+            label="DeepBook base asset type"
+            help="Base asset Move type for pool::place_limit_order."
+            value={config.deepbookBaseType}
+            onChange={(value) => updateConfig("deepbookBaseType", value)}
+          />
+          <EditableField
+            label="DeepBook quote asset type"
+            help="Quote asset Move type for pool::place_limit_order."
+            value={config.deepbookQuoteType}
+            onChange={(value) => updateConfig("deepbookQuoteType", value)}
+          />
+          <EditableField
+            label="Budget in base units"
+            help="The policy budget ceiling in the selected vault coin's smallest unit."
+            value={config.budgetMist}
+            onChange={(value) => updateConfig("budgetMist", value)}
+          />
+          <EditableField
+            label="Expires at ms"
+            help="Policy expiration timestamp in Unix milliseconds."
+            value={config.expiresAtMs}
+            onChange={(value) => updateConfig("expiresAtMs", value)}
+          />
+          <EditableField
+            label="Spend amount"
+            help="Amount released from the vault for the agent strategy, in the selected coin's smallest unit."
+            value={config.spendAmount}
+            onChange={(value) => updateConfig("spendAmount", value)}
+          />
+          <EditableField
+            label="Order quantity"
+            help="DeepBook order quantity passed to place_limit_order."
+            value={config.orderQuantity}
+            onChange={(value) => updateConfig("orderQuantity", value)}
+          />
+          <EditableField
+            label="Limit price"
+            help="Limit price used by the DeepBook demo transaction plan."
+            value={config.limitPrice}
+            onChange={(value) => updateConfig("limitPrice", value)}
+          />
+        </div>
+        <div className="button-row" style={{ marginTop: 16 }}>
+          <button className="button" type="button" disabled={isFetchingActivity} onClick={() => void fetchSuiActivity()}>
+            <Activity size={17} /> {isFetchingActivity ? "Fetching activity..." : "Fetch Sui activity"}
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() => {
+              const resetConfig = applySuiDeepBookMarket(null, "deep-sui-testnet");
+              setConfig(resetConfig);
+              setActivityEvents([]);
+              setActivityStatus("Sui workspace cleared.");
+            }}
+          >
+            <X size={17} /> Clear Sui IDs
+          </button>
+        </div>
+        <p className="inline-status">
+          <Info size={15} /> {activityStatus}
+        </p>
+      </section>
+
+      <SuiOverflowPanel config={config} activityEvents={activityEvents} onFetchActivity={() => void fetchSuiActivity()} isFetchingActivity={isFetchingActivity} />
+    </section>
+  );
+}
+
+function SuiGuidedDashboard({
+  stage,
+  password,
+  setPassword,
+  confirmPassword,
+  encryptedWallets,
+  unlockedWallets,
+  generateWallets,
+  unlockWallets,
+  walletStatus,
+  ownerBalance,
+  agentBalance,
+  requiredOwnerBalance,
+  requiredAgentBalance,
+  balanceStatus,
+  fetchBalances,
+  isFetchingBalances,
+  canContinueFunding,
+  continueFromFunding,
+  mandate,
+  setMandate,
+  parsedMandate,
+  applyMandate,
+  runProof,
+  revoke,
+  isRunning,
+  actionStatus,
+  explorerUrl,
+  progress,
+  config,
+  updateConfig,
+  activityEvents,
+  activityStatus,
+  fetchActivity,
+  isFetchingActivity,
+  deepBookOrders,
+  deepBookOrderStatus,
+  fetchDeepBookOrders,
+  isFetchingDeepBookOrders
+}: {
+  stage: ReturnType<typeof getSuiLaunchStage>;
+  password: string;
+  setPassword: (value: string) => void;
+  confirmPassword: () => void;
+  encryptedWallets: EncryptedSuiLocalWalletBundle | null;
+  unlockedWallets: SuiLocalWalletBundle | null;
+  generateWallets: () => void;
+  unlockWallets: () => void;
+  walletStatus: string;
+  ownerBalance: string;
+  agentBalance: string;
+  requiredOwnerBalance: string;
+  requiredAgentBalance: string;
+  balanceStatus: string;
+  fetchBalances: () => void;
+  isFetchingBalances: boolean;
+  canContinueFunding: boolean;
+  continueFromFunding: () => void;
+  mandate: string;
+  setMandate: (value: string) => void;
+  parsedMandate: ReturnType<typeof parseSuiAgentMandate>;
+  applyMandate: () => void;
+  runProof: () => void;
+  revoke: () => void;
+  isRunning: boolean;
+  actionStatus: string;
+  explorerUrl: string | null;
+  progress: string[];
+  config: SuiDashboardConfig;
+  updateConfig: (key: keyof SuiDashboardConfig, value: string) => void;
+  activityEvents: SuiActivityEvent[];
+  activityStatus: string;
+  fetchActivity: () => void;
+  isFetchingActivity: boolean;
+  deepBookOrders: SuiDeepBookOrder[];
+  deepBookOrderStatus: string;
+  fetchDeepBookOrders: () => void;
+  isFetchingDeepBookOrders: boolean;
+}) {
+  const [reviewStage, setReviewStage] = useState<SuiLaunchStage | null>(null);
+  const steps = [
+    ["password", "Secure"],
+    ["wallets", "Create"],
+    ["fund", "Fund"],
+    ["unlock", "Unlock"],
+    ["mandate", "Mandate"],
+    ["launch", "Launch"],
+    ["console", "Live"]
+  ] as const;
+  const activeIndex = steps.findIndex(([id]) => id === stage);
+  const isLive = stage === "console";
+  const isReviewing = reviewStage !== null && reviewStage !== stage;
+  const launchReadiness = getSuiFundingReadiness({
+    ownerBalance,
+    agentBalance,
+    budgetMist: config.budgetMist,
+    coinType: config.coinType
+  });
+
+  return (
+    <section className="sui-guided-shell">
+      <section className="panel sui-launch-header">
+        <div>
+          <span className="eyebrow">Sui autonomous agent wallet</span>
+          <h2>{isLive ? "Your agent is live." : "Launch an autonomous DeepBook agent."}</h2>
+          <p className="section-note">
+            Set one mandate. AgentWallet handles pool selection, Move policy creation, vault setup, and autonomous execution.
+          </p>
+        </div>
+        <div className="button-row compact">
+          {isReviewing ? (
+            <button className="button secondary small" type="button" onClick={() => setReviewStage(null)}>
+              Return to current step
+            </button>
+          ) : null}
+          <span className={`registry-status ${isLive ? "initialized" : "pending"}`}>
+            {isReviewing ? "reviewing history" : isLive ? "policy active" : `step ${activeIndex + 1} of ${steps.length}`}
+          </span>
+        </div>
+      </section>
+
+      <nav className="sui-stepper" aria-label="Sui setup progress">
+        {steps.map(([id, label], index) => (
+          <button
+            className={`${index <= activeIndex ? "sui-step complete" : "sui-step"} ${reviewStage === id ? "reviewing" : ""}`}
+            disabled={!canReviewSuiLaunchStage(stage, id)}
+            key={id}
+            onClick={() => setReviewStage(id === stage ? null : id)}
+            type="button"
+          >
+            <span>{index < activeIndex ? "✓" : index + 1}</span>
+            <strong>{label}</strong>
+          </button>
+        ))}
+      </nav>
+
+      {isReviewing && reviewStage ? (
+        <SuiStepReview
+          stage={reviewStage}
+          encryptedWallets={encryptedWallets}
+          ownerBalance={ownerBalance}
+          agentBalance={agentBalance}
+          parsedMandate={parsedMandate}
+          progress={progress}
+          config={config}
+          onReturn={() => setReviewStage(null)}
+        />
+      ) : null}
+
+      {!isReviewing && stage === "password" ? (
+        <section className="panel sui-focus-card">
+          <span className="eyebrow">Step 1 · Secure locally</span>
+          <h2>Set your wallet password</h2>
+          <p className="section-note">This password encrypts the owner and agent private keys in this browser. AgentWallet never stores it.</p>
+          <PasswordField label="Local encryption password" value={password} onChange={setPassword} help="Use at least 8 characters." />
+          <button className="button" type="button" onClick={confirmPassword}>
+            <ShieldCheck size={17} /> Set password
+          </button>
+        </section>
+      ) : null}
+
+      {!isReviewing && stage === "wallets" ? (
+        <section className="panel sui-focus-card">
+          <span className="eyebrow">Step 2 · Create wallets</span>
+          <h2>Create owner and agent wallets</h2>
+          <p className="section-note">The owner controls policy and revocation. The separate agent wallet signs autonomous DeepBook actions.</p>
+          <button className="button" type="button" onClick={generateWallets}>
+            <KeyRound size={17} /> Generate wallets
+          </button>
+          <p className="inline-status"><Info size={15} /> {walletStatus}</p>
+        </section>
+      ) : null}
+
+      {!isReviewing && stage === "fund" && encryptedWallets ? (
+        <section className="panel sui-focus-card">
+          <span className="eyebrow">Step 3 · Fund testnet wallets</span>
+          <h2>Give both wallets gas</h2>
+          <p className="section-note">Fund both addresses with Sui testnet SUI. AgentWallet checks readiness before continuing.</p>
+          <div className="setup-grid">
+            <SuiWalletReadinessCard label="Owner wallet" address={encryptedWallets.ownerAddress} balance={ownerBalance} requiredBalance={requiredOwnerBalance} />
+            <SuiWalletReadinessCard label="Agent wallet" address={encryptedWallets.agentAddress} balance={agentBalance} requiredBalance={requiredAgentBalance} />
+          </div>
+          <div className="button-row">
+            <a className="button secondary" href="https://faucet.sui.io/" target="_blank" rel="noreferrer">
+              <ExternalLink size={17} /> Open Sui faucet
+            </a>
+            <button className="button" type="button" disabled={isFetchingBalances} onClick={fetchBalances}>
+              <Activity size={17} /> {isFetchingBalances ? "Checking..." : "Check balances"}
+            </button>
+            <button className="button" type="button" disabled={!canContinueFunding || isFetchingBalances} onClick={continueFromFunding}>
+              Next
+            </button>
+          </div>
+          <p className="inline-status"><Info size={15} /> {balanceStatus}</p>
+        </section>
+      ) : null}
+
+      {!isReviewing && stage === "unlock" ? (
+        <section className="panel sui-focus-card">
+          <span className="eyebrow">Step 4 · Unlock locally</span>
+          <h2>Unlock AgentWallet</h2>
+          <p className="section-note">Enter the same password so the owner and agent can sign the launch transactions locally.</p>
+          <PasswordField label="Wallet password" value={password} onChange={setPassword} />
+          <button className="button" type="button" onClick={unlockWallets}>
+            <KeyRound size={17} /> Unlock wallets
+          </button>
+          <p className="inline-status"><Info size={15} /> {walletStatus}</p>
+        </section>
+      ) : null}
+
+      {!isReviewing && stage === "mandate" ? (
+        <section className="panel sui-focus-card">
+          <span className="eyebrow">Step 5 · Agent mandate</span>
+          <h2>Tell the agent its limits</h2>
+          <p className="section-note">AgentWallet automatically selects the verified DEEP/SUI pool and translates this instruction into a Move policy.</p>
+          <EditableField label="Instruction to agent" value={mandate} onChange={setMandate} help="Example: max 0.5 SUI, DeepBook only, expires 24h" />
+          <div className="setup-grid">
+            <SuiSummaryCard label="Budget" value={parsedMandate.budgetLabel} />
+            <SuiSummaryCard label="Protocol" value={`${parsedMandate.allowedProtocol} only`} />
+            <SuiSummaryCard label="Expires" value={`${Number(parsedMandate.expiresAtMs) / 3_600_000} hours`} />
+          </div>
+          <button className="button" type="button" onClick={applyMandate}>
+            <Bot size={17} /> Review mandate
+          </button>
+        </section>
+      ) : null}
+
+      {!isReviewing && stage === "launch" ? (
+        <section className="panel sui-focus-card">
+          <span className="eyebrow">Step 6 · Owner confirmation</span>
+          <h2>Approve and launch agent</h2>
+          <div className="setup-grid">
+            <SuiSummaryCard label="Maximum budget" value={parsedMandate.budgetLabel} />
+            <SuiSummaryCard label="Allowed venue" value="DeepBook · DEEP/SUI" />
+            <SuiSummaryCard label="Policy duration" value={`${Number(parsedMandate.expiresAtMs) / 3_600_000} hours`} />
+          </div>
+          <p className="section-note">
+            Launch requires approximately {formatSuiBalance(launchReadiness.requiredOwnerBalance)} SUI in the owner wallet
+            for the selected budget plus gas, and {formatSuiBalance(launchReadiness.requiredAgentBalance)} SUI in the agent
+            wallet for gas.
+          </p>
+          <button className="button" type="button" disabled={isRunning} onClick={runProof}>
+            <PlayCircle size={17} /> {isRunning ? "Launching agent..." : "Approve and launch agent"}
+          </button>
+          <SuiProgress entries={progress} />
+          <p className="inline-status"><Info size={15} /> {actionStatus}</p>
+        </section>
+      ) : null}
+
+      {!isReviewing && isLive ? (
+        <>
+          <section className="panel">
+            <div className="section-header">
+              <div><span className="eyebrow">Agent console</span><h2>Autonomous policy active</h2></div>
+              <button className="button secondary" type="button" onClick={revoke}><X size={17} /> Revoke agent access</button>
+            </div>
+            <div className="setup-grid">
+              <SuiSummaryCard label="Budget ceiling" value={parsedMandate.budgetLabel} />
+              <SuiSummaryCard label="Market" value="DeepBook · DEEP/SUI" />
+              <SuiSummaryCard label="Latest action" value={progress.at(-1) ?? "Waiting"} />
+            </div>
+            <SuiProgress entries={progress} />
+            <p className="inline-status"><Info size={15} /> {actionStatus}</p>
+            {explorerUrl ? <a className="explorer-link" href={explorerUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} /> View latest transaction</a> : null}
+          </section>
+          <section className="panel">
+            <div className="section-header">
+              <div><span className="eyebrow">DeepBook</span><h2>Agent orders</h2></div>
+              <button className="button secondary small" type="button" disabled={isFetchingDeepBookOrders} onClick={fetchDeepBookOrders}>
+                <Activity size={15} /> {isFetchingDeepBookOrders ? "Refreshing..." : "Refresh orders"}
+              </button>
+            </div>
+            <p className="inline-status"><Info size={15} /> {deepBookOrderStatus}</p>
+            <SuiDeepBookOrders orders={deepBookOrders} />
+          </section>
+          <section className="panel">
+            <div className="section-header">
+              <div><span className="eyebrow">On-chain activity</span><h2>Agent activity</h2></div>
+              <button className="button secondary small" type="button" disabled={isFetchingActivity} onClick={fetchActivity}><Activity size={15} /> Refresh</button>
+            </div>
+            <p className="inline-status"><Info size={15} /> {activityStatus}</p>
+            <SuiActivityLog events={activityEvents} />
+          </section>
+        </>
+      ) : null}
+
+      <details className="panel sui-technical-details">
+        <summary>Technical details</summary>
+        <p className="section-note">Object IDs and advanced controls for judges and debugging.</p>
+        <div className="policy-form">
+          <EditableField label="Sui package ID" value={config.packageId} onChange={(value) => updateConfig("packageId", value)} />
+          <EditableField label="Policy object ID" value={config.policyId} onChange={(value) => updateConfig("policyId", value)} />
+          <EditableField label="Vault object ID" value={config.vaultId} onChange={(value) => updateConfig("vaultId", value)} />
+          <EditableField label="Balance manager ID" value={config.balanceManagerId} onChange={(value) => updateConfig("balanceManagerId", value)} />
+        </div>
+        {unlockedWallets ? (
+          <div className="setup-grid">
+            <CopyField value={unlockedWallets.owner.privateKey} label="Copy owner private key" />
+            <CopyField value={unlockedWallets.agent.privateKey} label="Copy agent private key" />
+          </div>
+        ) : null}
+      </details>
+    </section>
+  );
+}
+
+function SuiStepReview({
+  stage,
+  encryptedWallets,
+  ownerBalance,
+  agentBalance,
+  parsedMandate,
+  progress,
+  config,
+  onReturn
+}: {
+  stage: SuiLaunchStage;
+  encryptedWallets: EncryptedSuiLocalWalletBundle | null;
+  ownerBalance: string;
+  agentBalance: string;
+  parsedMandate: ReturnType<typeof parseSuiAgentMandate>;
+  progress: string[];
+  config: SuiDashboardConfig;
+  onReturn: () => void;
+}) {
+  const titles: Record<SuiLaunchStage, string> = {
+    password: "Wallet security configured",
+    wallets: "Owner and agent wallets created",
+    fund: "Wallet funding readiness",
+    unlock: "Local signing access unlocked",
+    mandate: "Owner mandate",
+    launch: "Approved launch configuration",
+    console: "Live autonomous proof"
+  };
+
+  return (
+    <section className="panel sui-focus-card sui-review-card">
+      <div className="section-header">
+        <div>
+          <span className="eyebrow">Read-only step review</span>
+          <h2>{titles[stage]}</h2>
+        </div>
+        <button className="button secondary small" type="button" onClick={onReturn}>Return to current step</button>
+      </div>
+
+      {stage === "password" ? <p className="section-note">A local encryption password was configured. AgentWallet never displays or stores the password itself.</p> : null}
+      {stage === "wallets" && encryptedWallets ? (
+        <div className="setup-grid">
+          <SuiSummaryCard label="Owner wallet" value={shortAddress(encryptedWallets.ownerAddress)} />
+          <SuiSummaryCard label="Agent wallet" value={shortAddress(encryptedWallets.agentAddress)} />
+        </div>
+      ) : null}
+      {stage === "fund" ? (
+        <div className="setup-grid">
+          <SuiSummaryCard label="Owner balance" value={`${formatSuiBalance(ownerBalance)} SUI`} />
+          <SuiSummaryCard label="Agent balance" value={`${formatSuiBalance(agentBalance)} SUI`} />
+        </div>
+      ) : null}
+      {stage === "unlock" ? <p className="section-note">Both encrypted wallets were unlocked locally for signing. Private keys remain hidden in this review.</p> : null}
+      {stage === "mandate" || stage === "launch" ? (
+        <div className="setup-grid">
+          <SuiSummaryCard label="Maximum budget" value={parsedMandate.budgetLabel} />
+          <SuiSummaryCard label="Allowed venue" value="DeepBook · DEEP/SUI" />
+          <SuiSummaryCard label="Policy duration" value={`${Number(parsedMandate.expiresAtMs) / 3_600_000} hours`} />
+        </div>
+      ) : null}
+      {stage === "launch" ? (
+        <div className="setup-grid">
+          <SuiSummaryCard label="Policy object" value={config.policyId ? shortAddress(config.policyId) : "Created during launch"} />
+          <SuiSummaryCard label="Agent vault" value={config.vaultId ? shortAddress(config.vaultId) : "Created during launch"} />
+          <SuiSummaryCard label="DeepBook manager" value={config.balanceManagerId ? shortAddress(config.balanceManagerId) : "Created during launch"} />
+        </div>
+      ) : null}
+      {stage === "console" ? <SuiProgress entries={progress} /> : null}
+      <p className="inline-status"><Info size={15} /> Review mode cannot rerun or modify this step.</p>
+    </section>
+  );
+}
+
+function SuiSummaryCard({ label, value }: { label: string; value: string }) {
+  return <div className="devnet-card"><span className="eyebrow">{label}</span><strong>{value}</strong></div>;
+}
+
+function SuiWalletReadinessCard({ label, address, balance, requiredBalance }: { label: string; address: string; balance: string; requiredBalance: string }) {
+  const funded = BigInt(balance || "0") >= BigInt(requiredBalance || "0");
+  return (
+    <div className="devnet-card">
+      <span className="eyebrow">{label}</span>
+      <strong>{formatSuiBalance(balance)} SUI · {funded ? "Ready" : "Needs funding"}</strong>
+      <p>Required: at least {formatSuiBalance(requiredBalance)} SUI.</p>
+      <CopyField value={address} label={`Copy ${label} address`} />
+    </div>
+  );
+}
+
+function SuiProgress({ entries }: { entries: string[] }) {
+  if (!entries.length) return null;
+  return <div className="audit-list sui-progress-list">{entries.map((entry, index) => <div className="audit-item" key={`${entry}-${index}`}><CheckCircle2 size={16} /><span>{entry}</span></div>)}</div>;
+}
+
+function formatSuiBalance(balance: string) {
+  return (Number(balance || "0") / 1_000_000_000).toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+function SuiOverflowPanel({
+  config,
+  activityEvents,
+  onFetchActivity,
+  isFetchingActivity
+}: {
+  config: SuiDashboardConfig;
+  activityEvents: SuiActivityEvent[];
+  onFetchActivity: () => void;
+  isFetchingActivity: boolean;
+}) {
+  const commands = buildSuiDashboardCommands(config);
+
+  return (
+    <section className="panel span-2">
+      <div className="section-header">
+        <div>
+          <span className="eyebrow">Sui Overflow proof</span>
+          <h2>Sui agent wallet path</h2>
+        </div>
+        <span className="registry-status pending">testnet manual mode</span>
       </div>
       <p className="section-note">
-        Current API key: {agentApiKey ? "loaded in this browser" : "copy the one-time key after generation or rotation"}
+        This is the Sui implementation track: a Move policy object grants an agent a capped vault, limits the
+        DeepBook scope, emits an activity trail, and can be revoked by the owner. Use these commands after
+        installing the Sui CLI and filling in the object ids from testnet.
       </p>
+
+      <div className="proof-grid" style={{ marginTop: 12 }}>
+        {suiOverflowProofItems.map((item) => (
+          <div className="proof-link" key={item.title}>
+            <span className="eyebrow">{item.title}</span>
+            <strong>{item.detail}</strong>
+          </div>
+        ))}
+      </div>
+
+      <div className="setup-grid" style={{ marginTop: 12 }}>
+        <div className="devnet-card">
+          <span className="eyebrow">Move objects</span>
+          <strong>Policy, vault, and revocation are on-chain</strong>
+          <p>
+            The dashboard stays Solana-first for production, but the Sui package is ready for Overflow demos
+            where judges need to see Move policy objects and owner revocation.
+          </p>
+        </div>
+        <div className="devnet-card">
+          <span className="eyebrow">DeepBook path</span>
+          <strong>Budgeted order plan</strong>
+          <p>
+            The agent takes a capped coin from the vault, places a DeepBook limit order, then returns any
+            remaining balance through the policy-controlled flow.
+          </p>
+        </div>
+        <div className="devnet-card">
+          <span className="eyebrow">Activity events</span>
+          <strong>On-chain log parser</strong>
+          <p>{suiActivityEventLabels.join(", ")}</p>
+        </div>
+      </div>
+
+      <div className="setup-grid sui-command-grid" style={{ marginTop: 12 }}>
+        {commands.map((command) => (
+          <SuiCommandCard command={command} key={command.id} />
+        ))}
+      </div>
+
+      <div className="section-header" style={{ marginTop: 24 }}>
+        <div>
+          <span className="eyebrow">Sui on-chain activity</span>
+          <h2>Event log</h2>
+        </div>
+        <button className="button secondary small" type="button" disabled={isFetchingActivity} onClick={() => onFetchActivity()}>
+          <Activity size={15} /> Refresh
+        </button>
+      </div>
+      <SuiActivityLog events={activityEvents} />
+    </section>
+  );
+}
+
+function SuiActivityLog({ events }: { events: SuiActivityEvent[] }) {
+  if (!events.length) {
+    return (
+      <div className="log-list">
+        <div className="log-list-row">
+          <div className="log-list-main">
+            <strong>No Sui events loaded yet.</strong>
+            <p>Fetch activity after publishing the package and running policy/vault/DeepBook actions.</p>
+          </div>
+          <span className="decision-pill">waiting</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="log-list" role="list">
+      {events.map((event) => (
+        <div className="log-list-row audit-log-row" key={event.id} role="listitem">
+          <div className="log-list-time">
+            <span>{formatAuditDateFromMs(event.timestampMs)}</span>
+          </div>
+          <div className="log-list-main">
+            <strong>{event.type}</strong>
+            <p>{event.summary}</p>
+            {event.digest ? (
+              <a
+                className="explorer-link"
+                href={`https://suiexplorer.com/txblock/${event.digest}?network=testnet`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <ExternalLink size={15} /> View Sui transaction
+              </a>
+            ) : null}
+          </div>
+          <span className="decision-pill sim-passed">on-chain</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SuiDeepBookOrders({ orders }: { orders: SuiDeepBookOrder[] }) {
+  if (!orders.length) {
+    return (
+      <div className="log-list">
+        <div className="log-list-row">
+          <div className="log-list-main">
+            <strong>No DeepBook orders loaded yet.</strong>
+            <p>Run the autonomous strategy or refresh after a confirmed DeepBook transaction.</p>
+          </div>
+          <span className="decision-pill">waiting</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="log-list" role="list">
+      {orders.map((order) => (
+        <div className="log-list-row audit-log-row" key={order.orderId} role="listitem">
+          <div className="log-list-time">
+            <span>{formatAuditDateFromMs(order.timestampMs)}</span>
+          </div>
+          <div className="log-list-main">
+            <strong>{order.market} · {order.side === "buy" ? "Buy DEEP" : "Sell DEEP"}</strong>
+            <p>Order {order.orderId} · quantity {order.quantity} · price {order.price}</p>
+            {order.digest ? (
+              <a
+                className="explorer-link"
+                href={`https://suiexplorer.com/txblock/${order.digest}?network=testnet`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <ExternalLink size={15} /> View DeepBook transaction
+              </a>
+            ) : null}
+          </div>
+          <span className={`decision-pill ${order.status === "filled" ? "sim-passed" : ""}`}>{order.status}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SuiCommandCard({ command }: { command: ReturnType<typeof buildSuiDashboardCommands>[number] }) {
+  return (
+    <div className="devnet-card sui-command-card">
+      <span className="eyebrow">{command.eyebrow}</span>
+      <strong>{command.title}</strong>
+      <p>{command.description}</p>
+      <pre className="code-panel">{command.command}</pre>
+      <CopyField value={command.command} label={`Copy ${command.title} command`} />
     </div>
   );
 }
@@ -2507,6 +4532,45 @@ function AuditLogView({ events }: { events: SpendEvent[] }) {
   );
 }
 
+function ApprovalToast({
+  approval,
+  onApprove,
+  onReject,
+  onDismiss
+}: {
+  approval: AgentApproval;
+  onApprove: (approval: AgentApproval) => void;
+  onReject: (approval: AgentApproval) => void;
+  onDismiss: (approvalId: string) => void;
+}) {
+  return (
+    <aside className="approval-toast" role="status" aria-live="polite">
+      <button
+        className="icon-button ghost approval-toast-close"
+        type="button"
+        aria-label="Dismiss approval notification"
+        onClick={() => onDismiss(approval.id)}
+      >
+        <X size={15} />
+      </button>
+      <span className="eyebrow">Owner approval needed</span>
+      <strong>{approval.amount} token payment</strong>
+      <p>
+        Agent wants to pay {shortAddress(approval.recipient)}. Approve to execute
+        automatically, or reject the request.
+      </p>
+      <div className="button-row compact">
+        <button className="button small" type="button" onClick={() => onApprove(approval)}>
+          <ShieldCheck size={15} /> Approve
+        </button>
+        <button className="button secondary small" type="button" onClick={() => onReject(approval)}>
+          <X size={15} /> Reject
+        </button>
+      </div>
+    </aside>
+  );
+}
+
 function ProofLink({
   label,
   value,
@@ -2539,14 +4603,14 @@ function SimulatorView({
   return (
     <section className="panel simulator-panel" style={{ marginTop: 16 }}>
       <h2>Policy simulator</h2>
-      <div className="timeline">
+      <div className="log-list" role="list">
         {findings.map((finding) => (
-          <div className="event" key={finding.id}>
-            <header>
+          <div className="log-list-row" key={finding.id} role="listitem">
+            <div className="log-list-main">
               <strong>{finding.title}</strong>
-              <span className={`decision-pill sim-${finding.status}`}>{finding.status}</span>
-            </header>
-            <p>{finding.detail}</p>
+              <p>{finding.detail}</p>
+            </div>
+            <span className={`decision-pill sim-${finding.status}`}>{finding.status}</span>
           </div>
         ))}
       </div>
@@ -2556,21 +4620,54 @@ function SimulatorView({
 
 function AuditTimeline({ events }: { events: SpendEvent[] }) {
   return (
-    <div className="timeline">
+    <div className="log-list" role="list">
       {events.map((event) => (
-        <div className="event" key={event.id}>
-          <header>
+        <div className="log-list-row audit-log-row" key={event.id} role="listitem">
+          <div className="log-list-time">
+            <span>{formatAuditDate(event.createdAt)}</span>
+          </div>
+          <div className="log-list-main">
             <strong>{event.vendorName}</strong>
-            <DecisionIcon decision={event.decision} />
-          </header>
-          <p>
-            {event.amountUsd > 0 ? `$${event.amountUsd} for ` : ""}
-            {event.category}. {event.reasons.join(" ")}
-          </p>
+            <p>
+              {event.amountUsd > 0 ? `$${event.amountUsd} for ` : ""}
+              {event.category}. {event.reasons.join(" ")}
+            </p>
+          </div>
+          <DecisionIcon decision={event.decision} />
         </div>
       ))}
     </div>
   );
+}
+
+function formatAuditDate(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Now";
+  }
+
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function formatAuditDateFromMs(value: string | null) {
+  if (!value) {
+    return "No time";
+  }
+
+  const date = new Date(Number(value));
+
+  if (Number.isNaN(date.getTime())) {
+    return "No time";
+  }
+
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 function AgentWalletMark() {
@@ -2654,6 +4751,32 @@ function EditableField({
     <div className={`field ${className ?? ""}`}>
       <FieldLabel label={label} help={help} />
       <input value={value} onChange={(event) => onChange(event.target.value)} />
+    </div>
+  );
+}
+
+function PasswordField({
+  label,
+  value,
+  onChange,
+  help,
+  className
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  help?: string;
+  className?: string;
+}) {
+  return (
+    <div className={`field ${className ?? ""}`}>
+      <FieldLabel label={label} help={help} />
+      <input
+        type="password"
+        autoComplete="new-password"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
     </div>
   );
 }
@@ -2863,8 +4986,8 @@ function TokenCatalogField({
       </div>
       <div className="token-active-row">
         <FieldLabel
-          label="Active token for policy and tests"
-          help="The deployed devnet policy currently publishes one active token mint at a time. Pick any checked token here when you want to try another token."
+          label="Default token for tests"
+          help="All checked token mints are allowlisted on-chain. This selected token is only the default used by simple dashboard tests, Telegram, and SDK snippets."
         />
         <select
           value={activeValue}
@@ -3295,6 +5418,19 @@ function getErrorMessage(error: unknown) {
   }
 
   return "The wallet action was cancelled.";
+}
+
+function suiDemoStepLabel(action: SuiDashboardActionId) {
+  const labels: Record<SuiDashboardActionId, string> = {
+    "create-policy": "Owner policy creation",
+    "create-vault": "Agent vault creation",
+    "fund-vault": "Vault funding",
+    "create-balance-manager": "Agent DeepBook manager creation",
+    "run-deepbook-strategy": "Agent DeepBook strategy",
+    "revoke-policy": "Owner policy revocation"
+  };
+
+  return labels[action];
 }
 
 async function readJsonResponse<T = unknown>(response: Response): Promise<T> {

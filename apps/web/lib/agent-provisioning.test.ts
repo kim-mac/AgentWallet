@@ -4,9 +4,11 @@ import {
   createProvisionedAgent,
   createTelegramLink,
   decryptAgentKeypair,
+  exportAgentSecretKey,
   getAgentByApiKey,
   listProvisionedAgents,
   rotateProvisionedAgentApiKey,
+  setOwnerExportPassword,
   unlinkTelegram
 } from "./agent-provisioning";
 import { getProvisioningStore, resetMemoryProvisioningStore } from "./provisioning-store";
@@ -14,10 +16,11 @@ import { getProvisioningStore, resetMemoryProvisioningStore } from "./provisioni
 const owner = Keypair.generate().publicKey.toBase58();
 
 describe("agent provisioning", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env.AGENTSPEND_STORAGE_DRIVER = "memory";
     process.env.AGENTSPEND_ENCRYPTION_KEY = "test-encryption-key";
     resetMemoryProvisioningStore();
+    await setOwnerExportPassword(owner, { password: "owner-password" });
   });
 
   it("creates an encrypted agent record and returns the API key only once", async () => {
@@ -62,5 +65,35 @@ describe("agent provisioning", () => {
     expect((await store.getAgent(first.agent.id))?.telegramChatId).toBeNull();
     expect((await store.getAgent(second.agent.id))?.telegramChatId).toBe("chat-1");
     expect((await store.getAgentByTelegramChat("chat-1"))?.id).toBe(second.agent.id);
+  });
+
+  it("requires the owner recovery password before creating hosted wallets", async () => {
+    resetMemoryProvisioningStore();
+
+    await expect(
+      createProvisionedAgent(owner, { name: "No recovery agent" })
+    ).rejects.toThrow("Set the owner recovery password");
+  });
+
+  it("sets the owner recovery password only once", async () => {
+    await expect(
+      setOwnerExportPassword(owner, { password: "new-owner-password" })
+    ).rejects.toThrow("Owner recovery password is already set");
+  });
+
+  it("exports any hosted wallet private key with the owner recovery password", async () => {
+    const { agent } = await createProvisionedAgent(owner, { name: "Export agent" });
+
+    await expect(
+      exportAgentSecretKey(owner, agent.id, { password: "wrong-password" })
+    ).rejects.toThrow("Recovery password is incorrect");
+
+    const exported = await exportAgentSecretKey(owner, agent.id, {
+      password: "owner-password"
+    });
+
+    expect(exported.publicKey).toBe(agent.publicKey);
+    expect(exported.secretKeyBytes).toHaveLength(64);
+    expect(exported.secretKeyBase58.length).toBeGreaterThan(40);
   });
 });

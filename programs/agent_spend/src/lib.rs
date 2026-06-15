@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, TokenAccount, TokenInterface, TransferChecked};
 
-declare_id!("9eZMFa68NmfF4YNz5cF96AsJukbRzvvP1TDktN4cfbDU");
+declare_id!("C47kWvinbJVvPyZoSvLBjRjWXaoDGjsSadp2S1VgiLQN");
 
 #[program]
 pub mod agent_spend {
@@ -20,6 +20,14 @@ pub mod agent_spend {
             args.allowed_recipients.len() <= Policy::MAX_RECIPIENTS,
             AgentSpendError::TooManyRecipients
         );
+        require!(
+            !args.allowed_token_mints.is_empty(),
+            AgentSpendError::NoAllowedTokenMints
+        );
+        require!(
+            args.allowed_token_mints.len() <= Policy::MAX_TOKEN_MINTS,
+            AgentSpendError::TooManyTokenMints
+        );
 
         let policy = &mut ctx.accounts.policy;
         policy.owner = ctx.accounts.owner.key();
@@ -32,6 +40,7 @@ pub mod agent_spend {
         policy.period_started_at = Clock::get()?.unix_timestamp;
         policy.period_seconds = args.period_seconds.max(1);
         policy.allowed_recipients = args.allowed_recipients;
+        policy.allowed_token_mints = args.allowed_token_mints;
         policy.paused = false;
         policy.bump = ctx.bumps.policy;
 
@@ -54,13 +63,23 @@ pub mod agent_spend {
             args.allowed_recipients.len() <= Policy::MAX_RECIPIENTS,
             AgentSpendError::TooManyRecipients
         );
+        require!(
+            !args.allowed_token_mints.is_empty(),
+            AgentSpendError::NoAllowedTokenMints
+        );
+        require!(
+            args.allowed_token_mints.len() <= Policy::MAX_TOKEN_MINTS,
+            AgentSpendError::TooManyTokenMints
+        );
 
         let policy = &mut ctx.accounts.policy;
+        policy.token_mint = args.allowed_token_mints[0];
         policy.max_per_payment = args.max_per_payment;
         policy.daily_budget = args.daily_budget;
         policy.approval_threshold = args.approval_threshold;
         policy.period_seconds = args.period_seconds.max(1);
         policy.allowed_recipients = args.allowed_recipients;
+        policy.allowed_token_mints = args.allowed_token_mints;
 
         emit!(PolicyUpdated {
             policy: policy.key(),
@@ -107,6 +126,10 @@ pub mod agent_spend {
         require!(
             policy.allows_recipient(&ctx.accounts.recipient.key()),
             AgentSpendError::RecipientNotAllowed
+        );
+        require!(
+            policy.allows_token_mint(&ctx.accounts.mint.key()),
+            AgentSpendError::TokenMintNotAllowed
         );
         require!(
             amount <= policy.max_per_payment,
@@ -177,6 +200,7 @@ pub struct InitializePolicyArgs {
     pub approval_threshold: u64,
     pub period_seconds: i64,
     pub allowed_recipients: Vec<Pubkey>,
+    pub allowed_token_mints: Vec<Pubkey>,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -186,6 +210,7 @@ pub struct UpdatePolicyArgs {
     pub approval_threshold: u64,
     pub period_seconds: i64,
     pub allowed_recipients: Vec<Pubkey>,
+    pub allowed_token_mints: Vec<Pubkey>,
 }
 
 #[derive(Accounts)]
@@ -197,7 +222,7 @@ pub struct InitializePolicy<'info> {
         init,
         payer = owner,
         space = Policy::SPACE,
-        seeds = [b"policy", owner.key().as_ref(), args.agent.as_ref()],
+        seeds = [b"policy_v2", owner.key().as_ref(), args.agent.as_ref()],
         bump
     )]
     pub policy: Account<'info, Policy>,
@@ -219,6 +244,7 @@ pub struct OwnerPolicyAction<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(amount: u64, expires_at: i64)]
 pub struct ApprovePaymentIntent<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -233,7 +259,9 @@ pub struct ApprovePaymentIntent<'info> {
         seeds = [
             b"payment_intent",
             policy.key().as_ref(),
-            recipient.key().as_ref()
+            recipient.key().as_ref(),
+            &amount.to_le_bytes(),
+            &expires_at.to_le_bytes()
         ],
         bump
     )]
@@ -282,16 +310,23 @@ pub struct Policy {
     pub period_seconds: i64,
     #[max_len(12)]
     pub allowed_recipients: Vec<Pubkey>,
+    #[max_len(12)]
+    pub allowed_token_mints: Vec<Pubkey>,
     pub paused: bool,
     pub bump: u8,
 }
 
 impl Policy {
     pub const MAX_RECIPIENTS: usize = 12;
+    pub const MAX_TOKEN_MINTS: usize = 12;
     pub const SPACE: usize = 8 + Self::INIT_SPACE;
 
     pub fn allows_recipient(&self, recipient: &Pubkey) -> bool {
         self.allowed_recipients.iter().any(|allowed| allowed == recipient)
+    }
+
+    pub fn allows_token_mint(&self, mint: &Pubkey) -> bool {
+        self.allowed_token_mints.iter().any(|allowed| allowed == mint)
     }
 
     pub fn refresh_period(&mut self, now: i64) {
@@ -360,4 +395,10 @@ pub enum AgentSpendError {
     PaymentIntentExpired,
     #[msg("Payment intent was already used.")]
     PaymentIntentAlreadyUsed,
+    #[msg("At least one token mint must be allowlisted.")]
+    NoAllowedTokenMints,
+    #[msg("Too many allowed token mints.")]
+    TooManyTokenMints,
+    #[msg("Token mint is not allowlisted.")]
+    TokenMintNotAllowed,
 }

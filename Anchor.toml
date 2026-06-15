@@ -7,7 +7,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-agent_spend = "9eZMFa68NmfF4YNz5cF96AsJukbRzvvP1TDktN4cfbDU"
+agent_spend = "C47kWvinbJVvPyZoSvLBjRjWXaoDGjsSadp2S1VgiLQN"
+
+[programs.devnet]
+agent_spend = "C47kWvinbJVvPyZoSvLBjRjWXaoDGjsSadp2S1VgiLQN"
 
 [registry]
 url = "https://api.apr.dev"

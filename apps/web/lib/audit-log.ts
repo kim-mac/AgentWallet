@@ -7,6 +7,8 @@ export type AuditEventInput = {
   type:
     | "agent_created"
     | "api_key_rotated"
+    | "agent_export_password_updated"
+    | "agent_wallet_exported"
     | "policy_initialized"
     | "policy_updated"
     | "policy_paused"

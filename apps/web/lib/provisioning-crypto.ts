@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "crypto";
 import { getServerEnv } from "./server-wallet";
 
 const encryptionAlgorithm = "aes-256-gcm";
@@ -17,6 +17,21 @@ export function createTelegramLinkCode() {
 
 export function hashSecret(secret: string) {
   return createHash("sha256").update(secret).digest("hex");
+}
+
+export function createPasswordSalt() {
+  return randomBytes(16).toString("base64url");
+}
+
+export function hashExportPassword(password: string, salt: string) {
+  return scryptSync(password, salt, 32).toString("base64url");
+}
+
+export function verifyExportPassword(password: string, salt: string, expectedHash: string) {
+  const expected = Buffer.from(expectedHash, "base64url");
+  const actual = Buffer.from(hashExportPassword(password, salt), "base64url");
+
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
 export function encryptText(plainText: string, secret = getEncryptionSecret()) {

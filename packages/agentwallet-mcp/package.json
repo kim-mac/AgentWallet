@@ -1,0 +1,22 @@
+{
+  "name": "@agentwallet/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "bin": {
+    "agentwallet-mcp": "./src/server.ts"
+  },
+  "scripts": {
+    "test": "vitest run --pool=threads",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentwallet/sdk": "file:../agentwallet-sdk"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.3"
+  }
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAgentWalletStatus } from "./agent-wallet-status";
+import { buildAgentWalletSetupStatus, buildAgentWalletStatus } from "./agent-wallet-status";
 import type { ProvisionedAgentRecord } from "./provisioning-store";
 
 const baseAgent: ProvisionedAgentRecord = {
@@ -44,6 +44,33 @@ describe("buildAgentWalletStatus", () => {
       tokenMintConfigured: false,
       telegramLinked: false,
       missing: ["policyPda", "tokenMint"]
+    });
+  });
+
+  it("returns agent-readable setup guidance for missing policy configuration", () => {
+    expect(
+      buildAgentWalletSetupStatus({
+        ...baseAgent,
+        policyPda: null
+      })
+    ).toEqual({
+      ready: false,
+      missing: ["policy_pda"],
+      ownerActionRequired: true,
+      nextAction: "Ask the owner to initialize or update the on-chain policy for this hosted agent.",
+      availableActions: ["get_wallet_status", "get_audit_log"],
+      summary: "AgentWallet setup is incomplete."
+    });
+  });
+
+  it("returns agent-readable setup guidance when the wallet is ready", () => {
+    expect(buildAgentWalletSetupStatus(baseAgent)).toEqual({
+      ready: true,
+      missing: [],
+      ownerActionRequired: false,
+      nextAction: "The agent can request policy-gated payments.",
+      availableActions: ["get_wallet_status", "request_payment", "get_audit_log"],
+      summary: "AgentWallet is ready for policy-gated payments."
     });
   });
 });

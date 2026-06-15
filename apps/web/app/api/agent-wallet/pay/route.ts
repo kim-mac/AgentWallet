@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   AgentExecutionError,
   executeProvisionedAgentPayment,
+  formatAgentExecutionError,
   withAgentExecutionTimeout
 } from "../../../../lib/agent-executor";
 import { authorizeAgentRequest } from "../../../../lib/agent-request-auth";
@@ -20,9 +21,6 @@ export async function POST(request: Request) {
   } catch (error) {
     const status = error instanceof AgentExecutionError ? error.status : 400;
 
-    return NextResponse.json(
-      { ok: false, error: error instanceof Error ? error.message : "AgentWallet payment failed." },
-      { status }
-    );
+    return NextResponse.json(formatAgentExecutionError(error), { status });
   }
 }

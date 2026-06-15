@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   AgentExecutionError,
   executeProvisionedAgentPayment,
+  formatAgentExecutionError,
   withAgentExecutionTimeout
 } from "../../../../../lib/agent-executor";
 import { authorizeAgentRequest } from "../../../../../lib/agent-request-auth";
@@ -21,20 +22,6 @@ export async function POST(request: Request) {
   } catch (error) {
     const status = error instanceof AgentExecutionError ? error.status : 400;
 
-    return NextResponse.json(
-      {
-        ok: false,
-        error: getErrorMessage(error)
-      },
-      { status }
-    );
+    return NextResponse.json(formatAgentExecutionError(error), { status });
   }
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return "Unexpected agent execution error.";
 }
