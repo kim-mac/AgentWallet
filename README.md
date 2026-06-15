@@ -1,12 +1,12 @@
 # AgentWallet
-
+(Solana Hackathon Winner • Fast-Tracked for Solana Accelerator)
 Brex/Ramp-style spend controls for AI agents on Solana.
 
 `x402` lets agents pay. AgentWallet lets owners control how autonomous agents
 spend: budgets, approvals, vendor allowlists, recipient allowlists, and audit
 logs outside agent code.
 
-## What is built
+## What is built.
 
 - Next.js dashboard showing policies, approvals, payment decisions, and audit logs.
 - Shared TypeScript policy evaluator used by the API and dashboard.
@@ -25,7 +25,7 @@ logs outside agent code.
 - Devnet test token mint:
   `6XigBN521xmNyFV4DDgLpfGVsXTP3JstsaSTkbpNRXgk`.
 
-## Run the web demo
+## Run the web demo.
 
 ```bash
 npm install
@@ -34,7 +34,7 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-## Configure the devnet demo
+## Configure the devnet demo.
 
 Copy `.env.example` to `.env.local` and fill the values you want to enable:
 
