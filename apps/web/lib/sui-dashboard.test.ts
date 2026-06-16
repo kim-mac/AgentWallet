@@ -10,7 +10,10 @@ import {
   getSuiLaunchStage,
   getSuiFundingReadiness,
   getSuiGasReadiness,
+  getSuiBudgetMetrics,
+  getSuiPolicyExpiryState,
   findSuiDeepBookMarketId,
+  formatSuiTokenAmount,
   mergeSuiActivityIntoConfig,
   normalizeSuiDashboardConfig,
   parseSuiEventRpcResponse,
@@ -86,8 +89,14 @@ describe("Sui dashboard helpers", () => {
       policyId: "0xpolicy",
       vaultId: "",
       budgetMist: "500000000",
-      expiresAtMs: "1800"
+      expiresAtMs: "1800",
+      orderExecution: "limit"
     });
+  });
+
+  it("normalizes market order execution mode", () => {
+    expect(normalizeSuiDashboardConfig({ orderExecution: "market" }).orderExecution).toBe("market");
+    expect(normalizeSuiDashboardConfig({ orderExecution: "post-only" as never }).orderExecution).toBe("limit");
   });
 
   it("uses the deployed AgentWallet Sui package by default", () => {
@@ -169,6 +178,59 @@ describe("Sui dashboard helpers", () => {
       agentReady: true,
       requiredOwnerBalance: "50000000",
       requiredAgentBalance: "50000000"
+    });
+  });
+
+  it("derives used and remaining policy budget from the latest on-chain budget event", () => {
+    expect(
+      getSuiBudgetMetrics("500000000", [
+        {
+          id: "latest:0",
+          digest: "latest",
+          sequence: "0",
+          type: "AgentBudgetUsed",
+          timestampMs: "2",
+          summary: "AgentBudgetUsed",
+          parsedJson: { remaining_budget: "400000000" }
+        },
+        {
+          id: "older:0",
+          digest: "older",
+          sequence: "0",
+          type: "AgentBudgetUsed",
+          timestampMs: "1",
+          summary: "AgentBudgetUsed",
+          parsedJson: { remaining_budget: "450000000" }
+        }
+      ])
+    ).toEqual({
+      maxBudget: "500000000",
+      usedBudget: "100000000",
+      remainingBudget: "400000000"
+    });
+  });
+
+  it("shows the full policy budget remaining before the first on-chain spend", () => {
+    expect(getSuiBudgetMetrics("500000000", [])).toEqual({
+      maxBudget: "500000000",
+      usedBudget: "0",
+      remainingBudget: "500000000"
+    });
+  });
+
+  it("formats policy budget values using the mandate token decimals", () => {
+    expect(formatSuiTokenAmount("100000000", "SUI")).toBe("0.1 SUI");
+    expect(formatSuiTokenAmount("450000000", "USDC")).toBe("450 USDC");
+  });
+
+  it("shows an active countdown and then marks a Sui policy expired", () => {
+    expect(getSuiPolicyExpiryState("160000", 100000)).toEqual({
+      expired: false,
+      label: "Expires in 1m 0s"
+    });
+    expect(getSuiPolicyExpiryState("100000", 100001)).toEqual({
+      expired: true,
+      label: "Expired"
     });
   });
 

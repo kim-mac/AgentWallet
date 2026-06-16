@@ -13,6 +13,7 @@ import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import type { SuiDashboardConfig } from "./sui-dashboard";
 import { normalizeSuiDashboardConfig } from "./sui-dashboard";
+import { explainSuiTransactionError } from "./sui-errors";
 
 export type SuiDashboardActionId =
   | "create-policy"
@@ -29,6 +30,7 @@ export type SuiParsedAgentMandate = {
   maxBudget: string;
   allowedProtocol: "DeepBook";
   expiresAtMs: string;
+  durationLabel: string;
 };
 
 export type SuiDashboardActionPlan = {
@@ -135,7 +137,8 @@ export function buildSuiDashboardActionPlan(
         balanceManagerId: config.balanceManagerId,
         baseAssetType: config.deepbookBaseType,
         quoteAssetType: config.deepbookQuoteType,
-        orderType: "bid",
+        orderType: config.orderSide,
+        deepBookOrderType: config.orderExecution === "market" ? "1" : "0",
         price: config.limitPrice,
         quantity: config.orderQuantity,
         clockId: defaultDeepBookClockId
@@ -157,10 +160,14 @@ export function buildSuiDashboardActionPlan(
 export function parseSuiAgentMandate(input: string): SuiParsedAgentMandate {
   const normalized = input.trim();
   const budgetMatch = normalized.match(/max\s+([\d,.]+)\s*([a-zA-Z]+)/i);
-  const hoursMatch = normalized.match(/expires?\s+(\d+)\s*h/i);
+  const durationMatch = normalized.match(
+    /expires?\s+(?:in\s+)?(\d+)\s*(m(?:in(?:ute)?s?)?|h(?:our)?s?)/i
+  );
   const budgetAmount = budgetMatch?.[1]?.replace(/,/g, "") ?? "500";
   const tokenLabel = (budgetMatch?.[2] ?? "USDC").toUpperCase();
-  const hours = hoursMatch?.[1] ? Number(hoursMatch[1]) : 24;
+  const durationValue = durationMatch?.[1] ? Number(durationMatch[1]) : 24;
+  const durationUnit = durationMatch?.[2]?.toLowerCase().startsWith("m") ? "minute" : "hour";
+  const durationMs = durationValue * (durationUnit === "minute" ? 60_000 : 3_600_000);
   const decimals = tokenLabel === "USDC" ? 6 : 9;
   const parsedAmount = Number(budgetAmount);
   const scaledBudget = Number.isFinite(parsedAmount)
@@ -171,7 +178,8 @@ export function parseSuiAgentMandate(input: string): SuiParsedAgentMandate {
     budgetLabel: `${budgetAmount} ${tokenLabel}`,
     maxBudget: scaledBudget,
     allowedProtocol: "DeepBook",
-    expiresAtMs: String(hours * 60 * 60 * 1000)
+    expiresAtMs: String(durationMs),
+    durationLabel: `${durationValue} ${durationUnit}${durationValue === 1 ? "" : "s"}`
   };
 }
 
@@ -196,7 +204,6 @@ export function buildSuiAutonomousDemoSteps(
     steps.push("create-balance-manager");
   }
 
-  steps.push("run-deepbook-strategy", "prove-budget-ceiling");
   return steps;
 }
 
@@ -208,6 +215,17 @@ export function buildSuiOverBudgetConfig(
     ...config,
     spendAmount: (BigInt(config.budgetMist) + 1n).toString()
   };
+}
+
+export function describeSuiBudgetProofRejection(error: string) {
+  if (
+    (error.includes("record_budget_use") && error.includes("abort code: 6")) ||
+    error === "Rejected: this action exceeds the policy's remaining budget."
+  ) {
+    return "Budget ceiling verified: the Move policy blocked the deliberate over-budget action.";
+  }
+
+  return `Budget ceiling test rejected on-chain: ${error}`;
 }
 
 export async function submitSuiDashboardAction(input: {
@@ -258,14 +276,18 @@ export async function submitSuiDashboardAction(input: {
       ok: false,
       digest: submittedTransaction.digest,
       status,
-      error: stringifySuiExecutionError(rawTransaction.status?.error) ?? "Sui transaction failed.",
+      error: explainSuiTransactionError(
+        stringifySuiExecutionError(rawTransaction.status?.error) ?? "Sui transaction failed."
+      ),
       explorerUrl,
       raw: rawTransaction
     };
   } catch (error) {
     return {
       ok: false,
-      error: error instanceof Error ? error.message : "Sui transaction submission failed."
+      error: explainSuiTransactionError(
+        error instanceof Error ? error.message : "Sui transaction submission failed."
+      )
     };
   }
 }

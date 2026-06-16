@@ -29,6 +29,8 @@ export type SuiDashboardConfig = {
   spendAmount: string;
   orderQuantity: string;
   limitPrice: string;
+  orderSide: "bid" | "ask";
+  orderExecution: "limit" | "market";
 };
 
 export type SuiDeepBookMarket = {
@@ -127,7 +129,9 @@ const defaultSuiDashboardConfig: SuiDashboardConfig = {
   expiresAtMs: "1770000000000",
   spendAmount: "1000000",
   orderQuantity: "1000000",
-  limitPrice: "1000000000"
+  limitPrice: "1000000000",
+  orderSide: "bid",
+  orderExecution: "limit"
 };
 
 export function buildSuiBalanceRpcRequest(owner: string) {
@@ -196,9 +200,9 @@ export function getSuiFundingReadiness(input: {
 }) {
   const ownerBalance = toSafeBigInt(input.ownerBalance);
   const agentBalance = toSafeBigInt(input.agentBalance);
-  const budget = toSafeBigInt(input.budgetMist);
+  const vaultFunding = toSafeBigInt(input.budgetMist);
   const requiredOwnerBalance =
-    input.coinType.trim() === suiType ? budget + suiGasReserveMist : suiGasReserveMist;
+    input.coinType.trim() === suiType ? vaultFunding + suiGasReserveMist : suiGasReserveMist;
   const requiredAgentBalance = suiGasReserveMist;
 
   return {
@@ -225,6 +229,53 @@ export function getSuiGasReadiness(input: {
     requiredOwnerBalance: requiredBalance.toString(),
     requiredAgentBalance: requiredBalance.toString()
   };
+}
+
+export function getSuiBudgetMetrics(maxBudgetValue: string, events: SuiActivityEvent[]) {
+  const maxBudget = toSafeBigInt(maxBudgetValue);
+  const latestBudgetEvent = events
+    .filter((event) => event.type === "AgentBudgetUsed")
+    .sort((left, right) => Number(right.timestampMs ?? "0") - Number(left.timestampMs ?? "0"))
+    .find((event) => getFirstString(event.parsedJson, ["remaining_budget", "remainingBudget"]));
+  const reportedRemaining = latestBudgetEvent
+    ? toSafeBigInt(getFirstString(latestBudgetEvent.parsedJson, ["remaining_budget", "remainingBudget"]))
+    : maxBudget;
+  const remainingBudget = reportedRemaining > maxBudget ? maxBudget : reportedRemaining;
+  const usedBudget = maxBudget > remainingBudget ? maxBudget - remainingBudget : 0n;
+
+  return {
+    maxBudget: maxBudget.toString(),
+    usedBudget: usedBudget.toString(),
+    remainingBudget: remainingBudget.toString()
+  };
+}
+
+export function formatSuiTokenAmount(value: string, tokenLabel: string) {
+  const decimals = tokenLabel.trim().toUpperCase() === "USDC" ? 6 : 9;
+  const amount = toSafeBigInt(value);
+  const divisor = 10n ** BigInt(decimals);
+  const whole = amount / divisor;
+  const fraction = (amount % divisor).toString().padStart(decimals, "0").replace(/0+$/, "");
+  const formatted = fraction ? `${whole}.${fraction}` : whole.toString();
+
+  return `${formatted} ${tokenLabel.trim().toUpperCase() || "TOKEN"}`;
+}
+
+export function getSuiPolicyExpiryState(expiresAtMs: string, nowMs = Date.now()) {
+  const expiresAt = Number(expiresAtMs);
+  if (!Number.isFinite(expiresAt) || expiresAt <= nowMs) {
+    return { expired: true, label: "Expired" };
+  }
+
+  const remainingSeconds = Math.max(0, Math.ceil((expiresAt - nowMs) / 1000));
+  const hours = Math.floor(remainingSeconds / 3600);
+  const minutes = Math.floor((remainingSeconds % 3600) / 60);
+  const seconds = remainingSeconds % 60;
+  const label = hours > 0
+    ? `Expires in ${hours}h ${minutes}m`
+    : `Expires in ${minutes}m ${seconds}s`;
+
+  return { expired: false, label };
 }
 
 export const suiActivityEventLabels = [
@@ -277,7 +328,9 @@ export function normalizeSuiDashboardConfig(
     expiresAtMs: trimValue(source.expiresAtMs) || defaultSuiDashboardConfig.expiresAtMs,
     spendAmount: trimValue(source.spendAmount) || defaultSuiDashboardConfig.spendAmount,
     orderQuantity: trimValue(source.orderQuantity) || defaultSuiDashboardConfig.orderQuantity,
-    limitPrice: trimValue(source.limitPrice) || defaultSuiDashboardConfig.limitPrice
+    limitPrice: trimValue(source.limitPrice) || defaultSuiDashboardConfig.limitPrice,
+    orderSide: source.orderSide === "ask" ? "ask" : "bid",
+    orderExecution: source.orderExecution === "market" ? "market" : "limit"
   };
 }
 

@@ -3,6 +3,7 @@ import {
   buildSuiAutonomousDemoSteps,
   buildSuiDashboardActionPlan,
   buildSuiOverBudgetConfig,
+  describeSuiBudgetProofRejection,
   parseSuiAgentMandate,
   mergeSuiActionResultIntoConfig
 } from "./sui-dashboard-actions";
@@ -29,8 +30,17 @@ describe("Sui dashboard actions", () => {
       budgetLabel: "500 USDC",
       maxBudget: "500000000",
       allowedProtocol: "DeepBook",
-      expiresAtMs: "86400000"
+      expiresAtMs: "86400000",
+      durationLabel: "24 hours"
     });
+  });
+
+  it.each([
+    ["max 0.5 SUI, DeepBook only, expires 5m", "300000", "5 minutes"],
+    ["max 0.5 SUI, DeepBook only, expires 1 minute", "60000", "1 minute"],
+    ["max 0.5 SUI, DeepBook only, expires 2 hours", "7200000", "2 hours"]
+  ])("parses minute and hour expiry in %s", (input, expiresAtMs, durationLabel) => {
+    expect(parseSuiAgentMandate(input)).toMatchObject({ expiresAtMs, durationLabel });
   });
 
   it("builds a create-policy action signed by the owner", () => {
@@ -119,6 +129,33 @@ describe("Sui dashboard actions", () => {
     });
   });
 
+  it("builds a sell strategy as a DeepBook ask", () => {
+    const action = buildSuiDashboardActionPlan("run-deepbook-strategy", {
+      ...baseConfig,
+      deepbookPackageId: "0xdeepbook",
+      balanceManagerId: "0xbalance",
+      orderSide: "ask"
+    });
+
+    expect(action.plan.commands[3]).toMatchObject({
+      kind: "moveCall",
+      arguments: expect.arrayContaining(["false"])
+    });
+  });
+
+  it("builds a market strategy as a DeepBook immediate-or-cancel order", () => {
+    const action = buildSuiDashboardActionPlan("run-deepbook-strategy", {
+      ...baseConfig,
+      deepbookPackageId: "0xdeepbook",
+      balanceManagerId: "0xbalance",
+      orderExecution: "market"
+    });
+
+    const orderCommand = action.plan.commands[3];
+    expect(orderCommand).toMatchObject({ kind: "moveCall" });
+    expect(orderCommand?.kind === "moveCall" ? orderCommand.arguments[4] : null).toBe("1");
+  });
+
   it("merges policy and vault object ids from successful transaction results", () => {
     const nextConfig = mergeSuiActionResultIntoConfig(baseConfig, {
       ok: true,
@@ -200,7 +237,7 @@ describe("Sui dashboard actions", () => {
     expect(nextConfig.balanceManagerId).toBe("0xgrpcmanager");
   });
 
-  it("builds a fresh autonomous proof flow and keeps revocation owner-controlled", () => {
+  it("builds a fresh setup-only launch flow", () => {
     expect(
       buildSuiAutonomousDemoSteps({
         ...baseConfig,
@@ -212,19 +249,17 @@ describe("Sui dashboard actions", () => {
       "create-policy",
       "create-vault",
       "fund-vault",
-      "create-balance-manager",
-      "run-deepbook-strategy",
-      "prove-budget-ceiling"
+      "create-balance-manager"
     ]);
   });
 
-  it("skips setup objects that already exist in an autonomous proof flow", () => {
+  it("has no launch transactions after all setup objects exist", () => {
     expect(
       buildSuiAutonomousDemoSteps({
         ...baseConfig,
         balanceManagerId: "0xbalance"
       })
-    ).toEqual(["run-deepbook-strategy", "prove-budget-ceiling"]);
+    ).toEqual([]);
   });
 
   it("retries vault funding after a partial launch created an unfunded vault", () => {
@@ -236,10 +271,18 @@ describe("Sui dashboard actions", () => {
         },
         { vaultFunded: false }
       )
-    ).toEqual(["fund-vault", "create-balance-manager", "run-deepbook-strategy", "prove-budget-ceiling"]);
+    ).toEqual(["fund-vault", "create-balance-manager"]);
   });
 
   it("builds an amount that must exceed the configured policy ceiling", () => {
     expect(buildSuiOverBudgetConfig({ ...baseConfig, budgetMist: "500000000" }).spendAmount).toBe("500000001");
+  });
+
+  it("describes the expected budget ceiling rejection without presenting it as a broken transaction", () => {
+    expect(
+      describeSuiBudgetProofRejection(
+        "Transaction resolution failed: MoveAbort in 1st command, abort code: 6, in '0xpackage::policy::record_budget_use' (instruction 51)"
+      )
+    ).toBe("Budget ceiling verified: the Move policy blocked the deliberate over-budget action.");
   });
 });

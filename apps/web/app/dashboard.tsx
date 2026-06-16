@@ -24,6 +24,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { simulatePolicyAttacks } from "@agentspend/policy-simulator";
 import type { SpendEvent } from "@agentspend/shared";
 import { parseAgentCommand } from "../lib/agent-command";
+import { parseSuiAgentCommand, scaleSuiOrderQuantity } from "../lib/sui-agent-command";
 import {
   applySuiDeepBookMarket,
   buildSuiDashboardCommands,
@@ -31,16 +32,19 @@ import {
   findSuiDeepBookMarketId,
   getSuiFundingReadiness,
   getSuiGasReadiness,
+  getSuiBudgetMetrics,
   getSuiLaunchStage,
+  getSuiPolicyExpiryState,
   mergeSuiActivityIntoConfig,
   normalizeSuiDashboardConfig,
+  formatSuiTokenAmount,
   resolveSuiActivityConfig,
+  suiDeepBookMarkets,
   type SuiActivityEvent,
   type SuiDashboardConfig,
   type SuiDeepBookOrder,
   type SuiLaunchStage,
   suiActivityEventLabels,
-  suiDeepBookMarkets,
   suiOverflowProofItems
 } from "../lib/sui-dashboard";
 import { policy as initialPolicy, spendEvents } from "../lib/demo-data";
@@ -54,6 +58,7 @@ import type { PolicyFormValues } from "../lib/demo-state";
 import {
   buildSuiAutonomousDemoSteps,
   buildSuiOverBudgetConfig,
+  describeSuiBudgetProofRejection,
   mergeSuiActionResultIntoConfig,
   parseSuiAgentMandate,
   submitSuiDashboardAction,
@@ -3032,6 +3037,17 @@ function SuiView() {
   const [suiDemoProgress, setSuiDemoProgress] = useState<string[]>([]);
   const [suiActionStatus, setSuiActionStatus] = useState("Unlock local Sui wallets to run owner actions from the dashboard.");
   const [suiActionExplorerUrl, setSuiActionExplorerUrl] = useState<string | null>(null);
+  const [suiAgentCommand, setSuiAgentCommand] = useState("");
+  const [isSuiAgentExecuting, setIsSuiAgentExecuting] = useState(false);
+  const [suiAgentMessages, setSuiAgentMessages] = useState<AgentChatMessage[]>([
+    {
+      id: "sui-agent-intro",
+      role: "agent",
+      content:
+        "Give me a rule-based action: market buy 0.1 SUI of DEEP, limit buy 0.1 SUI of DEEP, show budget, show orders, or test over budget.",
+      status: "info"
+    }
+  ]);
   const [suiMandate, setSuiMandate] = useState("max 0.5 SUI, DeepBook only, expires 24h");
   const [passwordConfirmed, setPasswordConfirmed] = useState(false);
   const [fundingConfirmed, setFundingConfirmed] = useState(false);
@@ -3208,7 +3224,7 @@ function SuiView() {
       })
     );
     setSuiActionStatus(
-      `Mandate applied: max ${parsedSuiMandate.budgetLabel}, ${parsedSuiMandate.allowedProtocol} only, expires in ${Number(parsedSuiMandate.expiresAtMs) / 3_600_000}h.`
+      `Mandate applied: max ${parsedSuiMandate.budgetLabel}, ${parsedSuiMandate.allowedProtocol} only, expires in ${parsedSuiMandate.durationLabel}.`
     );
     setMandateApplied(true);
   }
@@ -3243,7 +3259,7 @@ function SuiView() {
       setBalanceStatus(
         readiness.ready
           ? mandateApplied
-            ? "Both wallets have enough SUI for the selected mandate budget and transaction gas."
+            ? "Both wallets have enough SUI for the full mandate budget and transaction gas."
             : "Both wallets have enough SUI for transaction gas. Choose the mandate budget next."
           : `Funding required: owner needs at least ${formatSuiBalance(readiness.requiredOwnerBalance)} SUI and agent needs at least ${formatSuiBalance(readiness.requiredAgentBalance)} SUI.`
       );
@@ -3308,14 +3324,164 @@ function SuiView() {
     }
   }
 
+  function appendSuiAgentMessage(message: Omit<AgentChatMessage, "id">) {
+    setSuiAgentMessages((current) => [
+      ...current,
+      {
+        ...message,
+        id: `sui-agent-${Date.now()}-${current.length}`
+      }
+    ]);
+  }
+
+  async function submitSuiAgentCommand() {
+    const input = suiAgentCommand.trim();
+    if (!input) {
+      return;
+    }
+
+    appendSuiAgentMessage({ role: "owner", content: input, status: "info" });
+    setSuiAgentCommand("");
+
+    try {
+      setIsSuiAgentExecuting(true);
+      const command = parseSuiAgentCommand(input);
+
+      if (command.kind === "show-budget") {
+        const metrics = getSuiBudgetMetrics(config.budgetMist, activityEvents);
+        appendSuiAgentMessage({
+          role: "agent",
+          content: `Budget used: ${formatSuiTokenAmount(metrics.usedBudget, config.tokenTypeLabel)}. Remaining: ${formatSuiTokenAmount(metrics.remainingBudget, config.tokenTypeLabel)}.`,
+          status: "info"
+        });
+        return;
+      }
+
+      if (command.kind === "show-orders") {
+        await fetchDeepBookOrders(config);
+        appendSuiAgentMessage({
+          role: "agent",
+          content: "DeepBook orders refreshed. Review the Agent orders section below.",
+          status: "info"
+        });
+        return;
+      }
+
+      if (getSuiPolicyExpiryState(config.expiresAtMs).expired) {
+        const message = "Rejected: this policy has expired. Create a new mandate before asking the agent to trade.";
+        appendSuiAgentMessage({ role: "agent", content: message, status: "rejected" });
+        setSuiActionStatus(message);
+        return;
+      }
+
+      if (!unlockedSuiWallets) {
+        throw new Error("Unlock the local Sui wallets before asking the agent to execute an action.");
+      }
+
+      const actionConfig =
+        command.kind === "test-over-budget"
+          ? buildSuiOverBudgetConfig(config)
+          : (() => {
+              const market = suiDeepBookMarkets.find(
+                (candidate) => candidate.poolId === config.allowedPoolId
+              );
+              return normalizeSuiDashboardConfig({
+                ...config,
+                spendAmount: command.amount,
+                orderQuantity: scaleSuiOrderQuantity(
+                  command.amount,
+                  market?.defaultSpendAmount ?? config.spendAmount,
+                  market?.defaultOrderQuantity ?? config.orderQuantity
+                ),
+                orderSide: command.side === "buy" ? "bid" : "ask",
+                orderExecution: command.execution
+              });
+            })();
+      setSuiActionStatus(
+        command.kind === "test-over-budget"
+          ? "Agent is deliberately testing the on-chain budget ceiling..."
+          : `Agent is submitting a ${command.execution} ${command.side} order through the Move policy...`
+      );
+      const result = await submitSuiDashboardAction({
+        action: "run-deepbook-strategy",
+        config: actionConfig,
+        privateKey: unlockedSuiWallets.agent.privateKey
+      });
+
+      if (command.kind === "test-over-budget") {
+        if (result.ok) {
+          appendSuiAgentMessage({
+            role: "agent",
+            content: "Policy test failed: the deliberately over-budget order unexpectedly executed.",
+            explorerUrl: result.explorerUrl,
+            status: "rejected"
+          });
+          return;
+        }
+
+        const budgetProofMessage = describeSuiBudgetProofRejection(result.error);
+        appendSuiAgentMessage({
+          role: "agent",
+          content: budgetProofMessage,
+          explorerUrl: result.explorerUrl,
+          status: "approved"
+        });
+        setSuiActionStatus(budgetProofMessage);
+        await fetchSuiActivity(config);
+        return;
+      }
+
+      if (!result.ok) {
+        const rejectionMessage = result.error.includes("remaining budget")
+          ? `${result.error} Remaining budget: ${formatSuiTokenAmount(
+              getSuiBudgetMetrics(config.budgetMist, activityEvents).remainingBudget,
+              config.tokenTypeLabel
+            )}`
+          : result.error;
+        appendSuiAgentMessage({
+          role: "agent",
+          content: rejectionMessage,
+          explorerUrl: result.explorerUrl,
+          status: "rejected"
+        });
+        setSuiActionExplorerUrl(result.explorerUrl ?? null);
+        setSuiActionStatus(rejectionMessage);
+        await fetchSuiActivity(config);
+        return;
+      }
+
+      const nextConfig = normalizeSuiDashboardConfig({
+        ...mergeSuiActionResultIntoConfig(actionConfig, result),
+        lastDeepBookTransactionDigest: result.digest
+      });
+      setConfig(nextConfig);
+      setSuiActionExplorerUrl(result.explorerUrl);
+      setSuiActionStatus(`Agent ${command.execution} ${command.side} order confirmed on Sui testnet: ${result.digest}.`);
+      appendSuiAgentMessage({
+        role: "agent",
+        content: `${command.execution === "market" ? "Market" : "Limit"} ${command.side} order approved by the Move policy and submitted to DeepBook.`,
+        explorerUrl: result.explorerUrl,
+        status: "approved"
+      });
+      await fetchSuiActivity(nextConfig);
+      await fetchDeepBookOrders(nextConfig);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      appendSuiAgentMessage({ role: "agent", content: message, status: "rejected" });
+      setSuiActionStatus(message);
+    } finally {
+      setIsSuiAgentExecuting(false);
+    }
+  }
+
   async function runSuiAutonomousDemo() {
     if (!unlockedSuiWallets) {
-      setSuiActionStatus("Unlock the local Sui wallets before running the autonomous proof.");
+      setSuiActionStatus("Unlock the local Sui wallets before launching the agent.");
       return;
     }
 
     if (!config.packageId.trim() || !config.agentAddress.trim() || !config.allowedPoolId.trim()) {
-      setSuiActionStatus("Enter the AgentWallet package ID and use a verified DeepBook market before running the proof.");
+      setSuiActionStatus("Enter the AgentWallet package ID and use a verified DeepBook market before launching the agent.");
       return;
     }
 
@@ -3331,7 +3497,7 @@ function SuiView() {
     });
     if (!readiness.ready) {
       setSuiActionStatus(
-        `Launch blocked before signing: owner needs at least ${formatSuiBalance(readiness.requiredOwnerBalance)} SUI for the vault budget plus gas, and agent needs at least ${formatSuiBalance(readiness.requiredAgentBalance)} SUI for gas.`
+        `Launch blocked before signing: owner needs at least ${formatSuiBalance(readiness.requiredOwnerBalance)} SUI for the full mandate budget plus gas, and agent needs at least ${formatSuiBalance(readiness.requiredAgentBalance)} SUI for gas.`
       );
       return;
     }
@@ -3370,7 +3536,7 @@ function SuiView() {
             throw new Error("Budget proof failed: the deliberately over-budget transaction unexpectedly succeeded.");
           }
 
-          progress.push(`Budget ceiling enforced on-chain: ${rejected.error}`);
+          progress.push(describeSuiBudgetProofRejection(rejected.error));
           setSuiDemoProgress([...progress]);
           continue;
         }
@@ -3402,10 +3568,9 @@ function SuiView() {
       }
 
       setSuiActionStatus(
-        "Autonomous proof complete: real DeepBook strategy executed and the over-budget action was blocked on-chain. Use Revoke policy for the final owner-control proof."
+        "Agent launched. Policy, vault funding, and DeepBook manager are ready. Use the agent command console to submit the first real DeepBook transaction."
       );
       await fetchSuiActivity(currentConfig);
-      await fetchDeepBookOrders(currentConfig);
     } catch (error) {
       setSuiActionStatus(getErrorMessage(error));
     } finally {
@@ -3424,7 +3589,8 @@ function SuiView() {
     walletsFunded: fundingConfirmed,
     unlocked: Boolean(unlockedSuiWallets),
     mandateApplied,
-    launched: suiDemoProgress.some((entry) => entry.includes("Agent DeepBook strategy confirmed"))
+    launched: Boolean(config.balanceManagerId) ||
+      suiDemoProgress.some((entry) => entry.includes("Agent DeepBook manager creation confirmed"))
   });
 
   return (
@@ -3477,6 +3643,11 @@ function SuiView() {
       deepBookOrderStatus={deepBookOrderStatus}
       fetchDeepBookOrders={() => void fetchDeepBookOrders()}
       isFetchingDeepBookOrders={isFetchingDeepBookOrders}
+      agentCommand={suiAgentCommand}
+      setAgentCommand={setSuiAgentCommand}
+      agentMessages={suiAgentMessages}
+      submitAgentCommand={() => void submitSuiAgentCommand()}
+      isAgentExecuting={isSuiAgentExecuting}
     />
   );
 
@@ -3536,11 +3707,11 @@ function SuiView() {
           />
         </div>
         <div className="devnet-card" style={{ marginTop: 14 }}>
-          <span className="eyebrow">One-click Overflow proof</span>
-          <strong>Run the autonomous DeepBook lifecycle</strong>
+          <span className="eyebrow">Sui agent setup</span>
+          <strong>Launch the policy-controlled agent</strong>
           <p>
-            Creates missing policy objects, funds a new vault, lets the agent place a real order, then proves the Move
-            budget ceiling with a rejected over-budget attempt. Owner revocation remains a separate final proof.
+            Creates missing policy objects, funds the vault with the selected operating balance, and creates the
+            DeepBook manager. Submit the first real order from the agent command console after launch.
           </p>
           <div className="button-row" style={{ marginTop: 12 }}>
             <button
@@ -3549,7 +3720,7 @@ function SuiView() {
               disabled={isRunningSuiDemo || !unlockedSuiWallets || !config.packageId.trim()}
               onClick={() => void runSuiAutonomousDemo()}
             >
-              <PlayCircle size={17} /> {isRunningSuiDemo ? "Running autonomous proof..." : "Run autonomous proof"}
+              <PlayCircle size={17} /> {isRunningSuiDemo ? "Launching agent..." : "Launch agent"}
             </button>
             <button
               className="button secondary"
@@ -3671,7 +3842,7 @@ function SuiView() {
         <div className="policy-form" style={{ marginTop: 14 }}>
           <EditableField
             label="Owner instruction to AI agent"
-            help="Example: max 500 USDC, DeepBook only, expires 24h."
+            help="Examples: max 0.5 SUI, DeepBook only, expires 5m · expires 24h."
             value={suiMandate}
             onChange={setSuiMandate}
           />
@@ -3689,7 +3860,7 @@ function SuiView() {
           </div>
           <div className="devnet-card">
             <span className="eyebrow">Expiry</span>
-            <strong>{Number(parsedSuiMandate.expiresAtMs) / 3_600_000} hours</strong>
+            <strong>{parsedSuiMandate.durationLabel}</strong>
             <p>Applied as an absolute timestamp when you create the policy.</p>
           </div>
         </div>
@@ -3942,7 +4113,12 @@ function SuiGuidedDashboard({
   deepBookOrders,
   deepBookOrderStatus,
   fetchDeepBookOrders,
-  isFetchingDeepBookOrders
+  isFetchingDeepBookOrders,
+  agentCommand,
+  setAgentCommand,
+  agentMessages,
+  submitAgentCommand,
+  isAgentExecuting
 }: {
   stage: ReturnType<typeof getSuiLaunchStage>;
   password: string;
@@ -3982,8 +4158,14 @@ function SuiGuidedDashboard({
   deepBookOrderStatus: string;
   fetchDeepBookOrders: () => void;
   isFetchingDeepBookOrders: boolean;
+  agentCommand: string;
+  setAgentCommand: (value: string) => void;
+  agentMessages: AgentChatMessage[];
+  submitAgentCommand: () => void;
+  isAgentExecuting: boolean;
 }) {
   const [reviewStage, setReviewStage] = useState<SuiLaunchStage | null>(null);
+  const [nowMs, setNowMs] = useState(Date.now());
   const steps = [
     ["password", "Secure"],
     ["wallets", "Create"],
@@ -4002,6 +4184,14 @@ function SuiGuidedDashboard({
     budgetMist: config.budgetMist,
     coinType: config.coinType
   });
+  const budgetMetrics = getSuiBudgetMetrics(config.budgetMist, activityEvents);
+  const expiryState = getSuiPolicyExpiryState(config.expiresAtMs, nowMs);
+
+  useEffect(() => {
+    if (!isLive || expiryState.expired) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [isLive, expiryState.expired]);
 
   return (
     <section className="sui-guided-shell">
@@ -4119,11 +4309,11 @@ function SuiGuidedDashboard({
           <span className="eyebrow">Step 5 · Agent mandate</span>
           <h2>Tell the agent its limits</h2>
           <p className="section-note">AgentWallet automatically selects the verified DEEP/SUI pool and translates this instruction into a Move policy.</p>
-          <EditableField label="Instruction to agent" value={mandate} onChange={setMandate} help="Example: max 0.5 SUI, DeepBook only, expires 24h" />
+          <EditableField label="Instruction to agent" value={mandate} onChange={setMandate} help="Examples: max 0.5 SUI, DeepBook only, expires 5m · expires 24h" />
           <div className="setup-grid">
             <SuiSummaryCard label="Budget" value={parsedMandate.budgetLabel} />
             <SuiSummaryCard label="Protocol" value={`${parsedMandate.allowedProtocol} only`} />
-            <SuiSummaryCard label="Expires" value={`${Number(parsedMandate.expiresAtMs) / 3_600_000} hours`} />
+            <SuiSummaryCard label="Expires" value={parsedMandate.durationLabel} />
           </div>
           <button className="button" type="button" onClick={applyMandate}>
             <Bot size={17} /> Review mandate
@@ -4137,12 +4327,13 @@ function SuiGuidedDashboard({
           <h2>Approve and launch agent</h2>
           <div className="setup-grid">
             <SuiSummaryCard label="Maximum budget" value={parsedMandate.budgetLabel} />
+            <SuiSummaryCard label="Vault deposit" value={parsedMandate.budgetLabel} />
             <SuiSummaryCard label="Allowed venue" value="DeepBook · DEEP/SUI" />
-            <SuiSummaryCard label="Policy duration" value={`${Number(parsedMandate.expiresAtMs) / 3_600_000} hours`} />
+            <SuiSummaryCard label="Policy duration" value={parsedMandate.durationLabel} />
           </div>
           <p className="section-note">
             Launch requires approximately {formatSuiBalance(launchReadiness.requiredOwnerBalance)} SUI in the owner wallet
-            for the selected budget plus gas, and {formatSuiBalance(launchReadiness.requiredAgentBalance)} SUI in the agent
+            to deposit the full mandate budget plus gas, and {formatSuiBalance(launchReadiness.requiredAgentBalance)} SUI in the agent
             wallet for gas.
           </p>
           <button className="button" type="button" disabled={isRunning} onClick={runProof}>
@@ -4157,13 +4348,65 @@ function SuiGuidedDashboard({
         <>
           <section className="panel">
             <div className="section-header">
-              <div><span className="eyebrow">Agent console</span><h2>Autonomous policy active</h2></div>
-              <button className="button secondary" type="button" onClick={revoke}><X size={17} /> Revoke agent access</button>
+              <div><span className="eyebrow">Agent console</span><h2>{expiryState.expired ? "Policy expired" : "Autonomous policy active"}</h2></div>
+              <button className="button secondary" type="button" disabled={expiryState.expired} onClick={revoke}><X size={17} /> Revoke agent access</button>
             </div>
             <div className="setup-grid">
-              <SuiSummaryCard label="Budget ceiling" value={parsedMandate.budgetLabel} />
+              <SuiSummaryCard
+                label="Budget used"
+                value={`${formatSuiTokenAmount(budgetMetrics.usedBudget, config.tokenTypeLabel)} / ${formatSuiTokenAmount(budgetMetrics.maxBudget, config.tokenTypeLabel)}`}
+              />
+              <SuiSummaryCard
+                label="Remaining budget"
+                value={formatSuiTokenAmount(budgetMetrics.remainingBudget, config.tokenTypeLabel)}
+              />
+              <SuiSummaryCard
+                label="Budget ceiling"
+                value={formatSuiTokenAmount(budgetMetrics.maxBudget, config.tokenTypeLabel)}
+              />
+              <SuiSummaryCard label="Policy status" value={expiryState.label} />
               <SuiSummaryCard label="Market" value="DeepBook · DEEP/SUI" />
               <SuiSummaryCard label="Latest action" value={progress.at(-1) ?? "Waiting"} />
+            </div>
+            <div className="sui-agent-command-console">
+              <div className="section-header">
+                <div>
+                  <span className="eyebrow">Rule-based agent action</span>
+                  <h2>Command the agent wallet</h2>
+                </div>
+                <span className={`registry-status ${expiryState.expired ? "paused" : "initialized"}`}>
+                  {expiryState.expired ? "Expired · actions blocked" : "Move policy enforced"}
+                </span>
+              </div>
+              <div className="chat-messages" aria-live="polite">
+                {agentMessages.map((message) => (
+                  <div className={`chat-message ${message.role}`} key={message.id}>
+                    <span>{message.role === "owner" ? "Owner" : "Sui agent"}</span>
+                    <p>{message.content}</p>
+                    {message.explorerUrl ? (
+                      <a className="explorer-link" href={message.explorerUrl} target="_blank" rel="noreferrer">
+                        <ExternalLink size={15} /> View transaction
+                      </a>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+              <EditableField
+                label="Agent command"
+                value={agentCommand}
+                onChange={setAgentCommand}
+                help="Rule-based examples: market buy 0.1 SUI of DEEP · limit buy 0.1 SUI of DEEP · show budget · test over budget"
+              />
+              <div className="button-row">
+                <button className="button" type="button" disabled={isAgentExecuting || !agentCommand.trim()} onClick={submitAgentCommand}>
+                  <Bot size={17} /> {isAgentExecuting ? "Agent executing..." : "Run agent action"}
+                </button>
+                {["market buy 0.1 SUI of DEEP", "limit buy 0.1 SUI of DEEP", "show budget", "test over budget"].map((example) => (
+                  <button className="button secondary small" type="button" key={example} onClick={() => setAgentCommand(example)}>
+                    {example}
+                  </button>
+                ))}
+              </div>
             </div>
             <SuiProgress entries={progress} />
             <p className="inline-status"><Info size={15} /> {actionStatus}</p>
@@ -4267,7 +4510,7 @@ function SuiStepReview({
         <div className="setup-grid">
           <SuiSummaryCard label="Maximum budget" value={parsedMandate.budgetLabel} />
           <SuiSummaryCard label="Allowed venue" value="DeepBook · DEEP/SUI" />
-          <SuiSummaryCard label="Policy duration" value={`${Number(parsedMandate.expiresAtMs) / 3_600_000} hours`} />
+          <SuiSummaryCard label="Policy duration" value={parsedMandate.durationLabel} />
         </div>
       ) : null}
       {stage === "launch" ? (

@@ -1284,6 +1284,27 @@ select {
   gap: 15px;
 }
 
+.sui-agent-command-console {
+  display: grid;
+  gap: 15px;
+  margin-top: 22px;
+  padding-top: 22px;
+  border-top: 0.5px solid var(--aw-border);
+}
+
+.sui-agent-command-console .section-header {
+  margin-bottom: 0;
+}
+
+.sui-agent-command-console .section-header h2 {
+  margin-bottom: 0;
+}
+
+.sui-agent-command-console .chat-messages {
+  min-height: 120px;
+  max-height: 300px;
+}
+
 .chat-messages {
   display: grid;
   gap: 10px;
