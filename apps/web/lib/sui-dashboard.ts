@@ -62,11 +62,20 @@ export type SuiActivityEvent = {
 export type SuiDeepBookOrder = {
   orderId: string;
   market: string;
+  poolId: string;
   side: "buy" | "sell";
+  execution: "limit" | "market" | "unknown";
+  assetFlow: string;
+  baseAsset: string;
+  quoteAsset: string;
+  baseQuantity: string;
+  quoteQuantity: string;
+  amountEvidence: string;
   status: "open" | "filled" | "cancelled" | "expired" | "fill observed";
   price: string;
   quantity: string;
   digest: string;
+  transactionUrl: string;
   timestampMs: string | null;
 };
 
@@ -525,10 +534,17 @@ export function buildSuiTransactionBlockRpcRequest(digest: string) {
 
 export function parseSuiDeepBookOrders(
   responses: unknown[],
-  filters: { balanceManagerId: string; poolId: string; marketLabel: string }
+  filters: {
+    balanceManagerId: string;
+    poolId: string;
+    marketLabel: string;
+    transactionDigest?: string;
+    executionHint?: "limit" | "market";
+  }
 ): SuiDeepBookOrder[] {
   const manager = filters.balanceManagerId.toLowerCase();
   const pool = filters.poolId.toLowerCase();
+  const hintedDigest = trimValue(filters.transactionDigest);
   const events = responses
     .flatMap((response) => getRpcEvents(response))
     .map((event) => normalizeDeepBookEvent(event, manager))
@@ -536,18 +552,41 @@ export function parseSuiDeepBookOrders(
     .filter((event) => (!manager || event.managerIds.includes(manager)) && (!pool || event.poolId === pool))
     .sort((left, right) => Number(left.timestampMs ?? "0") - Number(right.timestampMs ?? "0"));
   const orders = new Map<string, SuiDeepBookOrder>();
+  const marketAssets = getSuiMarketAssets(filters.marketLabel);
 
   for (const event of events) {
     for (const orderId of event.orderIds) {
       const previous = orders.get(orderId);
+      const side = event.side ?? previous?.side ?? "buy";
+      const baseQuantity = event.baseQuantity || previous?.baseQuantity || event.quantity || previous?.quantity || "";
+      const quoteQuantity = event.quoteQuantity || previous?.quoteQuantity || "";
       orders.set(orderId, {
         orderId,
         market: filters.marketLabel,
-        side: event.side ?? previous?.side ?? "buy",
+        poolId: event.poolId || previous?.poolId || filters.poolId,
+        side,
+        execution:
+          event.execution ??
+          previous?.execution ??
+          (hintedDigest && event.digest === hintedDigest ? filters.executionHint : undefined) ??
+          "unknown",
+        assetFlow: describeSuiOrderAssetFlow(filters.marketLabel, side),
+        baseAsset: marketAssets.base,
+        quoteAsset: marketAssets.quote,
+        baseQuantity,
+        quoteQuantity,
+        amountEvidence: describeSuiOrderAmountEvidence({
+          side,
+          baseAsset: marketAssets.base,
+          quoteAsset: marketAssets.quote,
+          baseQuantity,
+          quoteQuantity
+        }),
         status: event.status,
         price: event.price || previous?.price || "unknown",
         quantity: event.quantity || previous?.quantity || "unknown",
         digest: event.digest,
+        transactionUrl: event.digest ? `https://suiexplorer.com/txblock/${event.digest}?network=testnet` : "",
         timestampMs: event.timestampMs
       });
     }
@@ -556,6 +595,42 @@ export function parseSuiDeepBookOrders(
   return [...orders.values()].sort(
     (left, right) => Number(right.timestampMs ?? "0") - Number(left.timestampMs ?? "0")
   );
+}
+
+export function describeSuiOrderAssetFlow(marketLabel: string, side: "buy" | "sell") {
+  const { base, quote } = getSuiMarketAssets(marketLabel);
+
+  return side === "buy" ? `${quote} -> ${base}` : `${base} -> ${quote}`;
+}
+
+function describeSuiOrderAmountEvidence(input: {
+  side: "buy" | "sell";
+  baseAsset: string;
+  quoteAsset: string;
+  baseQuantity: string;
+  quoteQuantity: string;
+}) {
+  if (input.baseQuantity && input.quoteQuantity) {
+    return input.side === "buy"
+      ? `${input.quoteQuantity} ${input.quoteAsset} -> ${input.baseQuantity} ${input.baseAsset}`
+      : `${input.baseQuantity} ${input.baseAsset} -> ${input.quoteQuantity} ${input.quoteAsset}`;
+  }
+
+  if (input.baseQuantity) {
+    return input.side === "buy"
+      ? `${input.baseQuantity} ${input.baseAsset} requested with ${input.quoteAsset}`
+      : `${input.baseQuantity} ${input.baseAsset} offered for ${input.quoteAsset}`;
+  }
+
+  return `Amount pending for ${input.side === "buy" ? `${input.quoteAsset} -> ${input.baseAsset}` : `${input.baseAsset} -> ${input.quoteAsset}`}`;
+}
+
+function getSuiMarketAssets(marketLabel: string) {
+  const [baseRaw, quoteRaw] = marketLabel.split("/").map((part) => part.trim()).filter(Boolean);
+  return {
+    base: baseRaw || "base",
+    quote: quoteRaw || "quote"
+  };
 }
 
 export function resolveSuiActivityConfig(
@@ -744,12 +819,26 @@ function normalizeDeepBookEvent(event: unknown, selectedManager: string) {
     ]).map((value) => value.toLowerCase()),
     poolId: (getFirstString(parsedJson, ["pool_id"]) ?? "").toLowerCase(),
     side: isBid === null ? null : isBid ? ("buy" as const) : ("sell" as const),
+    execution: parseDeepBookExecution(getFirstString(parsedJson, ["order_type", "orderType"])),
     status,
     price: getFirstString(parsedJson, ["price"]) ?? "",
-    quantity:
-      getFirstString(parsedJson, ["placed_quantity", "original_quantity", "base_quantity"]) ?? "",
+    quantity: getFirstString(parsedJson, ["placed_quantity", "original_quantity", "base_quantity"]) ?? "",
+    baseQuantity: getFirstString(parsedJson, ["placed_quantity", "original_quantity", "base_quantity"]) ?? "",
+    quoteQuantity: getFirstString(parsedJson, ["quote_quantity", "cumulative_quote_quantity"]) ?? "",
     timestampMs: getFirstString(parsedJson, ["timestamp"]) ?? null
   };
+}
+
+function parseDeepBookExecution(value: string | null | undefined): "limit" | "market" | null {
+  if (value === "1" || value === "2") {
+    return "market";
+  }
+
+  if (value === "0" || value === "3") {
+    return "limit";
+  }
+
+  return null;
 }
 
 function getStringValues(source: Record<string, unknown>, keys: string[]) {

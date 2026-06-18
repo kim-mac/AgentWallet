@@ -6,6 +6,7 @@ import {
   buildSuiDeepBookEventRpcRequest,
   buildSuiTransactionBlockRpcRequest,
   canReviewSuiLaunchStage,
+  describeSuiOrderAssetFlow,
   buildSuiEventRpcRequest,
   getSuiLaunchStage,
   getSuiFundingReadiness,
@@ -318,6 +319,7 @@ describe("Sui dashboard helpers", () => {
                   pool_id: "0xpool",
                   order_id: "42",
                   price: "10000000000",
+                  order_type: "1",
                   is_bid: true,
                   placed_quantity: "10000000",
                   timestamp: "1770000000000"
@@ -346,13 +348,28 @@ describe("Sui dashboard helpers", () => {
       expect.objectContaining({
         orderId: "42",
         market: "DEEP / SUI",
+        poolId: "0xpool",
         side: "buy",
+        execution: "market",
+        assetFlow: "SUI -> DEEP",
+        baseAsset: "DEEP",
+        quoteAsset: "SUI",
+        baseQuantity: "10000000",
+        quoteQuantity: "",
+        amountEvidence: "10000000 DEEP requested with SUI",
+        transactionUrl: "https://suiexplorer.com/txblock/filled-digest?network=testnet",
         status: "filled",
         price: "10000000000",
         quantity: "10000000",
         digest: "filled-digest"
       })
     ]);
+  });
+
+  it("describes asset flow from a DeepBook market pair and order side", () => {
+    expect(describeSuiOrderAssetFlow("DEEP / SUI", "buy")).toBe("SUI -> DEEP");
+    expect(describeSuiOrderAssetFlow("DEEP / SUI", "sell")).toBe("DEEP -> SUI");
+    expect(describeSuiOrderAssetFlow("BTC / USDC", "buy")).toBe("USDC -> BTC");
   });
 
   it("keeps only the selected balance manager side of a DeepBook fill", () => {
@@ -380,6 +397,41 @@ describe("Sui dashboard helpers", () => {
     );
 
     expect(orders.map((order) => order.orderId)).toEqual(["agent-order"]);
+  });
+
+  it("shows filled swap amounts when DeepBook emits quote and base quantities", () => {
+    const orders = parseSuiDeepBookOrders(
+      [{
+        result: {
+          data: [{
+            id: { txDigest: "fill", eventSeq: "0" },
+            type: "0xdeepbook::order_info::OrderFilled",
+            parsedJson: {
+              maker_order_id: "maker-order",
+              taker_order_id: "agent-order",
+              maker_balance_manager_id: "0xother",
+              taker_balance_manager_id: "0xagent",
+              pool_id: "0xpool",
+              taker_is_bid: true,
+              price: "10",
+              base_quantity: "5",
+              quote_quantity: "50",
+              timestamp: "1"
+            }
+          }]
+        }
+      }],
+      { balanceManagerId: "0xagent", poolId: "0xpool", marketLabel: "DEEP / SUI" }
+    );
+
+    expect(orders).toEqual([
+      expect.objectContaining({
+        orderId: "agent-order",
+        assetFlow: "SUI -> DEEP",
+        amountEvidence: "50 SUI -> 5 DEEP",
+        transactionUrl: "https://suiexplorer.com/txblock/fill?network=testnet"
+      })
+    ]);
   });
 
   it("parses an OrderPlaced event from an exact strategy transaction response", () => {
@@ -411,6 +463,44 @@ describe("Sui dashboard helpers", () => {
         orderId: "184467440755542260233709280272",
         status: "open",
         digest: "strategy-digest"
+      })
+    ]);
+  });
+
+  it("uses the latest transaction execution hint when DeepBook events omit order type", () => {
+    const orders = parseSuiDeepBookOrders(
+      [{
+        result: {
+          digest: "strategy-digest",
+          events: [{
+            id: { txDigest: "strategy-digest", eventSeq: "3" },
+            type: "0xevents::order_info::OrderPlaced",
+            parsedJson: {
+              balance_manager_id: "0xmanager",
+              pool_id: "0xpool",
+              order_id: "99",
+              price: "10000000000",
+              is_bid: true,
+              placed_quantity: "10000000",
+              timestamp: "1781315117161"
+            }
+          }]
+        }
+      }],
+      {
+        balanceManagerId: "0xmanager",
+        poolId: "0xpool",
+        marketLabel: "DEEP / SUI",
+        transactionDigest: "strategy-digest",
+        executionHint: "market"
+      }
+    );
+
+    expect(orders).toEqual([
+      expect.objectContaining({
+        orderId: "99",
+        execution: "market",
+        assetFlow: "SUI -> DEEP"
       })
     ]);
   });

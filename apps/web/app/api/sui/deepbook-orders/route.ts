@@ -18,6 +18,7 @@ export async function POST(request: Request) {
     poolId?: unknown;
     marketLabel?: unknown;
     transactionDigest?: unknown;
+    executionHint?: unknown;
   };
   const deepbookPackageId =
     typeof body.deepbookPackageId === "string" ? body.deepbookPackageId.trim() : "";
@@ -27,6 +28,8 @@ export async function POST(request: Request) {
   const marketLabel = typeof body.marketLabel === "string" ? body.marketLabel.trim() : "DeepBook";
   const transactionDigest =
     typeof body.transactionDigest === "string" ? body.transactionDigest.trim() : "";
+  const executionHint =
+    body.executionHint === "market" || body.executionHint === "limit" ? body.executionHint : undefined;
 
   if (!deepbookPackageId || !balanceManagerId || !poolId) {
     return NextResponse.json(
@@ -62,7 +65,9 @@ export async function POST(request: Request) {
       orders: parseSuiDeepBookOrders(responses, {
         balanceManagerId,
         poolId,
-        marketLabel
+        marketLabel,
+        transactionDigest,
+        executionHint
       })
     });
   } catch (error) {

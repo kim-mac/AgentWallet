@@ -29,6 +29,7 @@ import {
   applySuiDeepBookMarket,
   buildSuiDashboardCommands,
   canReviewSuiLaunchStage,
+  describeSuiOrderAssetFlow,
   findSuiDeepBookMarketId,
   getSuiFundingReadiness,
   getSuiGasReadiness,
@@ -3196,7 +3197,8 @@ function SuiView() {
           balanceManagerId: configOverride.balanceManagerId,
           poolId: configOverride.allowedPoolId,
           marketLabel: "DEEP / SUI",
-          transactionDigest: configOverride.lastDeepBookTransactionDigest
+          transactionDigest: configOverride.lastDeepBookTransactionDigest,
+          executionHint: configOverride.orderExecution
         })
       });
       const payload = await readJsonResponse<{ orders: SuiDeepBookOrder[] }>(response);
@@ -3459,7 +3461,7 @@ function SuiView() {
       setSuiActionStatus(`Agent ${command.execution} ${command.side} order confirmed on Sui testnet: ${result.digest}.`);
       appendSuiAgentMessage({
         role: "agent",
-        content: `${command.execution === "market" ? "Market" : "Limit"} ${command.side} order approved by the Move policy and submitted to DeepBook.`,
+        content: `${command.execution === "market" ? "Market" : "Limit"} ${command.side} order approved by the Move policy and submitted to DeepBook. Asset route: ${describeSuiOrderAssetFlow("DEEP / SUI", command.side)}.`,
         explorerUrl: result.explorerUrl,
         status: "approved"
       });
@@ -4698,12 +4700,19 @@ function SuiDeepBookOrders({ orders }: { orders: SuiDeepBookOrder[] }) {
             <span>{formatAuditDateFromMs(order.timestampMs)}</span>
           </div>
           <div className="log-list-main">
-            <strong>{order.market} · {order.side === "buy" ? "Buy DEEP" : "Sell DEEP"}</strong>
-            <p>Order {order.orderId} · quantity {order.quantity} · price {order.price}</p>
+            <strong>
+              {order.market} - {order.execution === "market" ? "Market" : order.execution === "limit" ? "Limit" : "Unknown"} {order.side}
+            </strong>
+            <p>
+              Swap {order.assetFlow} - {order.amountEvidence}
+            </p>
+            <p>
+              Pool {shortAddress(order.poolId)} - order {order.orderId} - price {order.price} - tx {shortAddress(order.digest)}
+            </p>
             {order.digest ? (
               <a
                 className="explorer-link"
-                href={`https://suiexplorer.com/txblock/${order.digest}?network=testnet`}
+                href={order.transactionUrl}
                 target="_blank"
                 rel="noreferrer"
               >
