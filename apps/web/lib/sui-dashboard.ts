@@ -79,6 +79,32 @@ export type SuiDeepBookOrder = {
   timestampMs: string | null;
 };
 
+export type SuiProofSummary = {
+  status: {
+    label: "Active" | "Expired" | "Revoked" | "Draft";
+    tone: "initialized" | "pending" | "paused";
+    detail: string;
+  };
+  budget: {
+    used: string;
+    remaining: string;
+    max: string;
+    percentUsed: number;
+  };
+  latestOrder: {
+    headline: string;
+    evidence: string;
+    digest: string;
+    url: string;
+  } | null;
+  proofs: Array<{
+    label: string;
+    state: "proven" | "pending";
+    detail: string;
+    digest?: string;
+  }>;
+};
+
 export type SuiEventRpcRequest = {
   jsonrpc: "2.0";
   id: 1;
@@ -167,6 +193,10 @@ export function parseSuiBalanceRpcResponse(response: unknown) {
 }
 
 export function parseSuiGrpcBalanceResponse(response: unknown) {
+  return parseSuiGrpcCoinBalanceResponse(response);
+}
+
+export function parseSuiGrpcCoinBalanceResponse(response: unknown) {
   if (!response || typeof response !== "object") {
     return "0";
   }
@@ -260,14 +290,15 @@ export function getSuiBudgetMetrics(maxBudgetValue: string, events: SuiActivityE
 }
 
 export function formatSuiTokenAmount(value: string, tokenLabel: string) {
-  const decimals = tokenLabel.trim().toUpperCase() === "USDC" ? 6 : 9;
+  const normalizedLabel = tokenLabel.trim().toUpperCase();
+  const decimals = normalizedLabel === "USDC" || normalizedLabel === "DEEP" ? 6 : 9;
   const amount = toSafeBigInt(value);
   const divisor = 10n ** BigInt(decimals);
   const whole = amount / divisor;
   const fraction = (amount % divisor).toString().padStart(decimals, "0").replace(/0+$/, "");
   const formatted = fraction ? `${whole}.${fraction}` : whole.toString();
 
-  return `${formatted} ${tokenLabel.trim().toUpperCase() || "TOKEN"}`;
+  return `${formatted} ${normalizedLabel || "TOKEN"}`;
 }
 
 export function getSuiPolicyExpiryState(expiresAtMs: string, nowMs = Date.now()) {
@@ -285,6 +316,113 @@ export function getSuiPolicyExpiryState(expiresAtMs: string, nowMs = Date.now())
     : `Expires in ${minutes}m ${seconds}s`;
 
   return { expired: false, label };
+}
+
+export function getSuiProofSummary(
+  configValue: Partial<SuiDashboardConfig> | null | undefined,
+  events: SuiActivityEvent[],
+  orders: SuiDeepBookOrder[],
+  nowMs = Date.now()
+): SuiProofSummary {
+  const config = normalizeSuiDashboardConfig(configValue);
+  const budgetMetrics = getSuiBudgetMetrics(config.budgetMist, events);
+  const maxBudget = toSafeBigInt(budgetMetrics.maxBudget);
+  const usedBudget = toSafeBigInt(budgetMetrics.usedBudget);
+  const percentUsed = maxBudget > 0n ? Number((usedBudget * 100n) / maxBudget) : 0;
+  const expiryState = getSuiPolicyExpiryState(config.expiresAtMs, nowMs);
+  const policyCreated = findLatestSuiEvent(events, "PolicyCreated");
+  const vaultCreated = findLatestSuiEvent(events, "AgentVaultCreated");
+  const vaultFunded = findLatestSuiEvent(events, "AgentVaultFunded");
+  const budgetUsed = findLatestSuiEvent(events, "AgentBudgetUsed");
+  const revoked = findLatestSuiEvent(events, "PolicyRevoked");
+  const latestOrder = orders[0] ?? null;
+  const policyReady = Boolean(config.policyId || policyCreated);
+  const vaultReady = Boolean(config.vaultId || vaultCreated);
+  const managerReady = Boolean(config.balanceManagerId);
+
+  const status = revoked
+    ? {
+        label: "Revoked" as const,
+        tone: "paused" as const,
+        detail: "Owner revoked this policy on-chain. Future agent actions are blocked."
+      }
+    : expiryState.expired
+      ? {
+          label: "Expired" as const,
+          tone: "paused" as const,
+          detail: "The mandate time window has ended. Create a new policy before the agent spends again."
+        }
+      : policyReady
+        ? {
+            label: "Active" as const,
+            tone: "initialized" as const,
+            detail: `Move policy enforced. ${expiryState.label}.`
+          }
+        : {
+            label: "Draft" as const,
+            tone: "pending" as const,
+            detail: "Create the Sui policy object to begin the on-chain proof."
+          };
+
+  return {
+    status,
+    budget: {
+      used: formatSuiTokenAmount(budgetMetrics.usedBudget, config.tokenTypeLabel),
+      remaining: formatSuiTokenAmount(budgetMetrics.remainingBudget, config.tokenTypeLabel),
+      max: formatSuiTokenAmount(budgetMetrics.maxBudget, config.tokenTypeLabel),
+      percentUsed: Math.min(100, Math.max(0, percentUsed))
+    },
+    latestOrder: latestOrder
+      ? {
+          headline: `${capitalize(latestOrder.execution)} ${latestOrder.side} on ${latestOrder.market}`,
+          evidence: latestOrder.amountEvidence,
+          digest: latestOrder.digest,
+          url: latestOrder.transactionUrl
+        }
+      : null,
+    proofs: [
+      {
+        label: "Policy object",
+        state: policyReady ? "proven" : "pending",
+        detail: policyReady ? "Owner-created Move policy exists on testnet." : "Create the owner policy object.",
+        digest: policyCreated?.digest
+      },
+      {
+        label: "Vault funded",
+        state: vaultReady && Boolean(vaultFunded) ? "proven" : "pending",
+        detail: vaultReady && vaultFunded
+          ? "The policy vault has received owner funds."
+          : "Create and fund the policy vault.",
+        digest: vaultFunded?.digest
+      },
+      {
+        label: "DeepBook order",
+        state: latestOrder ? "proven" : "pending",
+        detail: latestOrder
+          ? `${latestOrder.execution === "market" ? "Market" : latestOrder.execution === "limit" ? "Limit" : "DeepBook"} order observed for ${latestOrder.assetFlow}.`
+          : managerReady
+            ? "Run an agent order and refresh DeepBook evidence."
+            : "Create the agent DeepBook manager first.",
+        digest: latestOrder?.digest
+      },
+      {
+        label: "Budget enforced",
+        state: budgetUsed ? "proven" : "pending",
+        detail: budgetUsed
+          ? `Used ${formatSuiTokenAmount(budgetMetrics.usedBudget, config.tokenTypeLabel)} of ${formatSuiTokenAmount(budgetMetrics.maxBudget, config.tokenTypeLabel)}.`
+          : "Submit an agent action to emit AgentBudgetUsed.",
+        digest: budgetUsed?.digest
+      },
+      {
+        label: "Owner revocation",
+        state: revoked ? "proven" : "pending",
+        detail: revoked
+          ? "Owner revocation event is on-chain."
+          : "Revoke the policy to prove owner control.",
+        digest: revoked?.digest
+      }
+    ]
+  };
 }
 
 export const suiActivityEventLabels = [
@@ -549,7 +687,11 @@ export function parseSuiDeepBookOrders(
     .flatMap((response) => getRpcEvents(response))
     .map((event) => normalizeDeepBookEvent(event, manager))
     .filter((event): event is NonNullable<ReturnType<typeof normalizeDeepBookEvent>> => Boolean(event))
-    .filter((event) => (!manager || event.managerIds.includes(manager)) && (!pool || event.poolId === pool))
+    .filter(
+      (event) =>
+        (!manager || event.managerIds.includes(manager) || Boolean(hintedDigest && event.digest === hintedDigest)) &&
+        (!pool || event.poolId === pool)
+    )
     .sort((left, right) => Number(left.timestampMs ?? "0") - Number(right.timestampMs ?? "0"));
   const orders = new Map<string, SuiDeepBookOrder>();
   const marketAssets = getSuiMarketAssets(filters.marketLabel);
@@ -712,6 +854,20 @@ function toSafeBigInt(value: unknown) {
   }
 }
 
+function findLatestSuiEvent(events: SuiActivityEvent[], type: string) {
+  return [...events]
+    .filter((event) => event.type === type)
+    .sort((left, right) => Number(right.timestampMs ?? "0") - Number(left.timestampMs ?? "0"))[0] ?? null;
+}
+
+function capitalize(value: string) {
+  if (!value) {
+    return "Unknown";
+  }
+
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+}
+
 function commandValue(value: string, fallback: string) {
   return value || fallback;
 }
@@ -802,7 +958,13 @@ function normalizeDeepBookEvent(event: unknown, selectedManager: string) {
           getFirstString(parsedJson, ["taker_balance_manager_id"])?.toLowerCase() === selectedManager
             ? getFirstString(parsedJson, ["taker_order_id"])
             : null
-        ].filter((value): value is string => Boolean(value))
+        ]
+          .filter((value): value is string => Boolean(value))
+          .concat(
+            getStringValues(parsedJson, ["taker_order_id", "maker_order_id"]).filter(
+              (orderId) => !hasMatchingManagerIds(parsedJson, selectedManager) && Boolean(orderId)
+            )
+          )
       : getStringValues(parsedJson, ["order_id"]);
   if (!orderIds.length) {
     return null;
@@ -827,6 +989,20 @@ function normalizeDeepBookEvent(event: unknown, selectedManager: string) {
     quoteQuantity: getFirstString(parsedJson, ["quote_quantity", "cumulative_quote_quantity"]) ?? "",
     timestampMs: getFirstString(parsedJson, ["timestamp"]) ?? null
   };
+}
+
+function hasMatchingManagerIds(parsedJson: Record<string, unknown>, selectedManager: string) {
+  if (!selectedManager) {
+    return false;
+  }
+
+  return getStringValues(parsedJson, [
+    "balance_manager_id",
+    "maker_balance_manager_id",
+    "taker_balance_manager_id"
+  ])
+    .map((value) => value.toLowerCase())
+    .includes(selectedManager);
 }
 
 function parseDeepBookExecution(value: string | null | undefined): "limit" | "market" | null {

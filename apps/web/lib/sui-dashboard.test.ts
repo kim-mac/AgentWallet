@@ -13,6 +13,7 @@ import {
   getSuiGasReadiness,
   getSuiBudgetMetrics,
   getSuiPolicyExpiryState,
+  getSuiProofSummary,
   findSuiDeepBookMarketId,
   formatSuiTokenAmount,
   mergeSuiActivityIntoConfig,
@@ -21,6 +22,7 @@ import {
   parseSuiBalanceRpcResponse,
   parseSuiDeepBookOrders,
   parseSuiGrpcBalanceResponse,
+  parseSuiGrpcCoinBalanceResponse,
   resolveSuiActivityConfig,
   suiActivityEventLabels,
   suiDeepBookMarkets,
@@ -128,6 +130,18 @@ describe("Sui dashboard helpers", () => {
     expect(parseSuiGrpcBalanceResponse(null)).toBe("0");
   });
 
+  it("parses arbitrary Sui coin balances for acquired assets", () => {
+    expect(
+      parseSuiGrpcCoinBalanceResponse({
+        balance: {
+          balance: "123456789",
+          coinType: "0xdeep::DEEP"
+        }
+      })
+    ).toBe("123456789");
+    expect(parseSuiGrpcCoinBalanceResponse({})).toBe("0");
+  });
+
   it("derives the current guided Sui launch stage", () => {
     expect(getSuiLaunchStage({ hasPassword: false, hasWallets: false, walletsFunded: false, unlocked: false, mandateApplied: false, launched: false })).toBe("password");
     expect(getSuiLaunchStage({ hasPassword: true, hasWallets: true, walletsFunded: false, unlocked: false, mandateApplied: false, launched: false })).toBe("fund");
@@ -222,6 +236,7 @@ describe("Sui dashboard helpers", () => {
   it("formats policy budget values using the mandate token decimals", () => {
     expect(formatSuiTokenAmount("100000000", "SUI")).toBe("0.1 SUI");
     expect(formatSuiTokenAmount("450000000", "USDC")).toBe("450 USDC");
+    expect(formatSuiTokenAmount("123456789", "DEEP")).toBe("123.456789 DEEP");
   });
 
   it("shows an active countdown and then marks a Sui policy expired", () => {
@@ -505,6 +520,46 @@ describe("Sui dashboard helpers", () => {
     ]);
   });
 
+  it("keeps market order evidence from the exact transaction even when the balance manager id is omitted", () => {
+    const orders = parseSuiDeepBookOrders(
+      [{
+        result: {
+          digest: "market-digest",
+          events: [{
+            id: { txDigest: "market-digest", eventSeq: "4" },
+            type: "0xdeepbook::order_info::OrderFilled",
+            parsedJson: {
+              pool_id: "0xpool",
+              taker_order_id: "agent-market-order",
+              taker_is_bid: true,
+              price: "10000000000",
+              base_quantity: "10000000",
+              quote_quantity: "100000000",
+              timestamp: "1781315117161"
+            }
+          }]
+        }
+      }],
+      {
+        balanceManagerId: "0xmanager",
+        poolId: "0xpool",
+        marketLabel: "DEEP / SUI",
+        transactionDigest: "market-digest",
+        executionHint: "market"
+      }
+    );
+
+    expect(orders).toEqual([
+      expect.objectContaining({
+        orderId: "agent-market-order",
+        execution: "market",
+        side: "buy",
+        amountEvidence: "100000000 SUI -> 10000000 DEEP",
+        digest: "market-digest"
+      })
+    ]);
+  });
+
   it("ignores click-event-shaped activity overrides and uses the current config", () => {
     const current = normalizeSuiDashboardConfig({ packageId: "0xpackage", policyId: "0xpolicy" });
 
@@ -670,5 +725,131 @@ describe("Sui dashboard helpers", () => {
       "AgentVaultReturned",
       "PolicyRevoked"
     ]);
+  });
+
+  it("summarizes the Sui proof state from activity, budget, revocation, and DeepBook orders", () => {
+    const summary = getSuiProofSummary(
+      normalizeSuiDashboardConfig({
+        budgetMist: "500000000",
+        tokenTypeLabel: "SUI",
+        expiresAtMs: "180000",
+        policyId: "0xpolicy",
+        vaultId: "0xvault",
+        balanceManagerId: "0xmanager"
+      }),
+      [
+        {
+          id: "created:0",
+          digest: "created",
+          sequence: "0",
+          type: "PolicyCreated",
+          timestampMs: "1",
+          summary: "PolicyCreated",
+          parsedJson: { policy_id: "0xpolicy" }
+        },
+        {
+          id: "vault:0",
+          digest: "vault",
+          sequence: "0",
+          type: "AgentVaultCreated",
+          timestampMs: "2",
+          summary: "AgentVaultCreated",
+          parsedJson: { vault_id: "0xvault" }
+        },
+        {
+          id: "funded:0",
+          digest: "funded",
+          sequence: "0",
+          type: "AgentVaultFunded",
+          timestampMs: "3",
+          summary: "AgentVaultFunded",
+          parsedJson: { amount: "500000000" }
+        },
+        {
+          id: "spent:0",
+          digest: "spent",
+          sequence: "0",
+          type: "AgentBudgetUsed",
+          timestampMs: "4",
+          summary: "AgentBudgetUsed",
+          parsedJson: { amount: "100000000", remaining_budget: "400000000" }
+        }
+      ],
+      [
+        {
+          orderId: "42",
+          market: "DEEP / SUI",
+          poolId: "0xpool",
+          side: "buy",
+          execution: "market",
+          assetFlow: "SUI -> DEEP",
+          baseAsset: "DEEP",
+          quoteAsset: "SUI",
+          baseQuantity: "10000000",
+          quoteQuantity: "100000000",
+          amountEvidence: "100000000 SUI -> 10000000 DEEP",
+          status: "open",
+          price: "10000000000",
+          quantity: "10000000",
+          digest: "order-digest",
+          transactionUrl: "https://suiexplorer.com/txblock/order-digest?network=testnet",
+          timestampMs: "5"
+        }
+      ],
+      120000
+    );
+
+    expect(summary.status).toEqual({
+      label: "Active",
+      tone: "initialized",
+      detail: "Move policy enforced. Expires in 1m 0s."
+    });
+    expect(summary.budget).toMatchObject({
+      used: "0.1 SUI",
+      remaining: "0.4 SUI",
+      max: "0.5 SUI",
+      percentUsed: 20
+    });
+    expect(summary.proofs).toEqual([
+      expect.objectContaining({ label: "Policy object", state: "proven" }),
+      expect.objectContaining({ label: "Vault funded", state: "proven" }),
+      expect.objectContaining({ label: "DeepBook order", state: "proven" }),
+      expect.objectContaining({ label: "Budget enforced", state: "proven" }),
+      expect.objectContaining({ label: "Owner revocation", state: "pending" })
+    ]);
+    expect(summary.latestOrder).toMatchObject({
+      headline: "Market buy on DEEP / SUI",
+      evidence: "100000000 SUI -> 10000000 DEEP",
+      digest: "order-digest"
+    });
+  });
+
+  it("marks a Sui proof as revoked when the owner revocation event exists", () => {
+    const summary = getSuiProofSummary(
+      normalizeSuiDashboardConfig({ expiresAtMs: "180000" }),
+      [
+        {
+          id: "revoked:0",
+          digest: "revoked",
+          sequence: "0",
+          type: "PolicyRevoked",
+          timestampMs: "3",
+          summary: "PolicyRevoked",
+          parsedJson: { policy_id: "0xpolicy" }
+        }
+      ],
+      [],
+      120000
+    );
+
+    expect(summary.status).toEqual({
+      label: "Revoked",
+      tone: "paused",
+      detail: "Owner revoked this policy on-chain. Future agent actions are blocked."
+    });
+    expect(summary.proofs.find((proof) => proof.label === "Owner revocation")).toMatchObject({
+      state: "proven",
+      digest: "revoked"
+    });
   });
 });

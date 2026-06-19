@@ -1675,6 +1675,69 @@ select {
   margin-top: 2px;
 }
 
+.sui-proof-overview {
+  display: grid;
+  gap: 16px;
+}
+
+.sui-proof-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.15fr) repeat(2, minmax(220px, 0.9fr));
+  gap: 12px;
+}
+
+.sui-proof-budget {
+  min-height: 150px;
+}
+
+.sui-budget-meter {
+  overflow: hidden;
+  height: 7px;
+  margin-top: 12px;
+  border: 0.5px solid var(--aw-border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.sui-budget-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--aw-accent);
+}
+
+.sui-proof-checklist {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.sui-proof-check {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  border: 0.5px solid var(--aw-border);
+  border-radius: var(--aw-radius-sm);
+  background: rgba(255, 255, 255, 0.018);
+  padding: 12px;
+}
+
+.sui-proof-check strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--aw-text-1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sui-proof-check p {
+  margin: 0;
+  color: var(--aw-text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .sui-review-card {
   min-height: 260px;
 }
@@ -1731,6 +1794,11 @@ select {
 
   .sui-stepper {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .sui-proof-grid,
+  .sui-proof-checklist {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1797,6 +1865,11 @@ select {
 
   .sui-stepper {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sui-proof-grid,
+  .sui-proof-checklist {
+    grid-template-columns: 1fr;
   }
 
   .audit-log-row {

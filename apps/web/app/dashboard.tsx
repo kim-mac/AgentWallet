@@ -36,6 +36,7 @@ import {
   getSuiBudgetMetrics,
   getSuiLaunchStage,
   getSuiPolicyExpiryState,
+  getSuiProofSummary,
   mergeSuiActivityIntoConfig,
   normalizeSuiDashboardConfig,
   formatSuiTokenAmount,
@@ -3055,6 +3056,7 @@ function SuiView() {
   const [mandateApplied, setMandateApplied] = useState(false);
   const [ownerSuiBalance, setOwnerSuiBalance] = useState("0");
   const [agentSuiBalance, setAgentSuiBalance] = useState("0");
+  const [agentDeepBalance, setAgentDeepBalance] = useState("0");
   const [balanceStatus, setBalanceStatus] = useState("Generate wallets, then check their Sui testnet balances.");
   const [isFetchingBalances, setIsFetchingBalances] = useState(false);
   const parsedSuiMandate = useMemo(() => parseSuiAgentMandate(suiMandate), [suiMandate]);
@@ -3245,12 +3247,14 @@ function SuiView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           owner: encryptedSuiWallets.ownerAddress,
-          agent: encryptedSuiWallets.agentAddress
+          agent: encryptedSuiWallets.agentAddress,
+          deepType: config.deepbookBaseType
         })
       });
-      const balances = await readJsonResponse<{ ownerBalance: string; agentBalance: string }>(response);
+      const balances = await readJsonResponse<{ ownerBalance: string; agentBalance: string; agentDeepBalance?: string }>(response);
       setOwnerSuiBalance(balances.ownerBalance);
       setAgentSuiBalance(balances.agentBalance);
+      setAgentDeepBalance(balances.agentDeepBalance ?? "0");
       const readiness = mandateApplied
         ? getSuiFundingReadiness({
             ...balances,
@@ -3318,6 +3322,7 @@ function SuiView() {
       await fetchSuiActivity(nextConfig);
       if (action === "run-deepbook-strategy") {
         await fetchDeepBookOrders(nextConfig);
+        await fetchSuiBalances();
       }
     } catch (error) {
       setSuiActionStatus(getErrorMessage(error));
@@ -3467,6 +3472,7 @@ function SuiView() {
       });
       await fetchSuiActivity(nextConfig);
       await fetchDeepBookOrders(nextConfig);
+      await fetchSuiBalances();
     } catch (error) {
       const message = getErrorMessage(error);
       appendSuiAgentMessage({ role: "agent", content: message, status: "rejected" });
@@ -3615,6 +3621,7 @@ function SuiView() {
       walletStatus={suiWalletStatus}
       ownerBalance={ownerSuiBalance}
       agentBalance={agentSuiBalance}
+      agentDeepBalance={agentDeepBalance}
       requiredOwnerBalance={suiGasReadiness.requiredOwnerBalance}
       requiredAgentBalance={suiGasReadiness.requiredAgentBalance}
       balanceStatus={balanceStatus}
@@ -4089,6 +4096,7 @@ function SuiGuidedDashboard({
   walletStatus,
   ownerBalance,
   agentBalance,
+  agentDeepBalance,
   requiredOwnerBalance,
   requiredAgentBalance,
   balanceStatus,
@@ -4133,6 +4141,7 @@ function SuiGuidedDashboard({
   walletStatus: string;
   ownerBalance: string;
   agentBalance: string;
+  agentDeepBalance: string;
   requiredOwnerBalance: string;
   requiredAgentBalance: string;
   balanceStatus: string;
@@ -4188,6 +4197,7 @@ function SuiGuidedDashboard({
   });
   const budgetMetrics = getSuiBudgetMetrics(config.budgetMist, activityEvents);
   const expiryState = getSuiPolicyExpiryState(config.expiresAtMs, nowMs);
+  const proofSummary = getSuiProofSummary(config, activityEvents, deepBookOrders, nowMs);
 
   useEffect(() => {
     if (!isLive || expiryState.expired) return;
@@ -4348,25 +4358,44 @@ function SuiGuidedDashboard({
 
       {!isReviewing && isLive ? (
         <>
+          <SuiProofOverview summary={proofSummary} />
           <section className="panel">
             <div className="section-header">
-              <div><span className="eyebrow">Agent console</span><h2>{expiryState.expired ? "Policy expired" : "Autonomous policy active"}</h2></div>
-              <button className="button secondary" type="button" disabled={expiryState.expired} onClick={revoke}><X size={17} /> Revoke agent access</button>
+              <div>
+                <span className="eyebrow">Agent balances</span>
+                <h2>Wallet holdings after execution</h2>
+              </div>
+              <button className="button secondary small" type="button" disabled={isFetchingBalances} onClick={fetchBalances}>
+                <Activity size={15} /> {isFetchingBalances ? "Refreshing..." : "Refresh balances"}
+              </button>
+            </div>
+            <div className="setup-grid">
+              <SuiSummaryCard label="Agent SUI gas" value={`${formatSuiBalance(agentBalance)} SUI`} />
+              <SuiSummaryCard label="Agent DEEP balance" value={formatSuiTokenAmount(agentDeepBalance, "DEEP")} />
+              <SuiSummaryCard label="Owner SUI balance" value={`${formatSuiBalance(ownerBalance)} SUI`} />
+            </div>
+            <p className="inline-status"><Info size={15} /> {balanceStatus}</p>
+          </section>
+          <section className="panel">
+            <div className="section-header">
+              <div><span className="eyebrow">Agent console</span><h2>{proofSummary.status.label === "Revoked" ? "Policy revoked" : expiryState.expired ? "Policy expired" : "Autonomous policy active"}</h2></div>
+              <button className="button secondary" type="button" disabled={expiryState.expired || proofSummary.status.label === "Revoked"} onClick={revoke}><X size={17} /> Revoke agent access</button>
             </div>
             <div className="setup-grid">
               <SuiSummaryCard
                 label="Budget used"
-                value={`${formatSuiTokenAmount(budgetMetrics.usedBudget, config.tokenTypeLabel)} / ${formatSuiTokenAmount(budgetMetrics.maxBudget, config.tokenTypeLabel)}`}
+                value={`${proofSummary.budget.used} / ${proofSummary.budget.max}`}
               />
               <SuiSummaryCard
                 label="Remaining budget"
-                value={formatSuiTokenAmount(budgetMetrics.remainingBudget, config.tokenTypeLabel)}
+                value={proofSummary.budget.remaining}
               />
               <SuiSummaryCard
                 label="Budget ceiling"
-                value={formatSuiTokenAmount(budgetMetrics.maxBudget, config.tokenTypeLabel)}
+                value={proofSummary.budget.max}
               />
-              <SuiSummaryCard label="Policy status" value={expiryState.label} />
+              <SuiSummaryCard label="Agent DEEP balance" value={formatSuiTokenAmount(agentDeepBalance, "DEEP")} />
+              <SuiSummaryCard label="Policy status" value={proofSummary.status.detail} />
               <SuiSummaryCard label="Market" value="DeepBook · DEEP/SUI" />
               <SuiSummaryCard label="Latest action" value={progress.at(-1) ?? "Waiting"} />
             </div>
@@ -4451,6 +4480,81 @@ function SuiGuidedDashboard({
           </div>
         ) : null}
       </details>
+    </section>
+  );
+}
+
+function SuiProofOverview({ summary }: { summary: ReturnType<typeof getSuiProofSummary> }) {
+  return (
+    <section className="panel sui-proof-overview">
+      <div className="section-header">
+        <div>
+          <span className="eyebrow">Judge proof state</span>
+          <h2>What is proven on-chain</h2>
+        </div>
+        <span className={`registry-status ${summary.status.tone}`}>
+          {summary.status.label}
+        </span>
+      </div>
+
+      <div className="sui-proof-grid">
+        <div className="devnet-card sui-proof-budget">
+          <span className="eyebrow">Budget enforcement</span>
+          <strong>{summary.budget.used} used</strong>
+          <p>{summary.budget.remaining} remaining from a {summary.budget.max} policy ceiling.</p>
+          <div className="sui-budget-meter" aria-label={`${summary.budget.percentUsed}% of budget used`}>
+            <span style={{ width: `${summary.budget.percentUsed}%` }} />
+          </div>
+        </div>
+
+        <div className="devnet-card">
+          <span className="eyebrow">Latest DeepBook order</span>
+          {summary.latestOrder ? (
+            <>
+              <strong>{summary.latestOrder.headline}</strong>
+              <p>{summary.latestOrder.evidence}</p>
+              <a className="explorer-link" href={summary.latestOrder.url} target="_blank" rel="noreferrer">
+                <ExternalLink size={15} /> View order transaction
+              </a>
+            </>
+          ) : (
+            <>
+              <strong>No order evidence yet</strong>
+              <p>Run an agent command, then refresh orders to show the DeepBook transaction.</p>
+            </>
+          )}
+        </div>
+
+        <div className="devnet-card">
+          <span className="eyebrow">Policy status</span>
+          <strong>{summary.status.label}</strong>
+          <p>{summary.status.detail}</p>
+        </div>
+      </div>
+
+      <div className="sui-proof-checklist" role="list">
+        {summary.proofs.map((proof) => (
+          <div className="sui-proof-check" key={proof.label} role="listitem">
+            <span className={`decision-pill ${proof.state === "proven" ? "sim-passed" : ""}`}>
+              {proof.state}
+            </span>
+            <div>
+              <strong>{proof.label}</strong>
+              <p>{proof.detail}</p>
+              {proof.digest ? (
+                <a
+                  className="explorer-link"
+                  href={`https://suiexplorer.com/txblock/${proof.digest}?network=testnet`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLink size={15} /> Evidence transaction
+                </a>
+              ) : null}
+            </div>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }

@@ -1,6 +1,6 @@
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { NextResponse } from "next/server";
-import { parseSuiGrpcBalanceResponse, suiType } from "../../../../lib/sui-dashboard";
+import { deepbookDeepType, parseSuiGrpcBalanceResponse, parseSuiGrpcCoinBalanceResponse, suiType } from "../../../../lib/sui-dashboard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,9 +12,11 @@ export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
     owner?: unknown;
     agent?: unknown;
+    deepType?: unknown;
   };
   const owner = typeof body.owner === "string" ? body.owner.trim() : "";
   const agent = typeof body.agent === "string" ? body.agent.trim() : "";
+  const deepType = typeof body.deepType === "string" && body.deepType.trim() ? body.deepType.trim() : deepbookDeepType;
 
   if (!owner || !agent) {
     return NextResponse.json({ error: "Owner and agent Sui addresses are required." }, { status: 400 });
@@ -26,14 +28,16 @@ export async function POST(request: Request) {
   });
 
   try {
-    const [ownerResponse, agentResponse] = await Promise.all([
+    const [ownerResponse, agentResponse, agentDeepResponse] = await Promise.all([
       client.getBalance({ owner, coinType: suiType }),
-      client.getBalance({ owner: agent, coinType: suiType })
+      client.getBalance({ owner: agent, coinType: suiType }),
+      client.getBalance({ owner: agent, coinType: deepType })
     ]);
 
     return NextResponse.json({
       ownerBalance: parseSuiGrpcBalanceResponse(ownerResponse),
-      agentBalance: parseSuiGrpcBalanceResponse(agentResponse)
+      agentBalance: parseSuiGrpcBalanceResponse(agentResponse),
+      agentDeepBalance: parseSuiGrpcCoinBalanceResponse(agentDeepResponse)
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "Unknown Sui balance error.";

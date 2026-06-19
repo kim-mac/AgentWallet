@@ -8,6 +8,8 @@ export type SuiTransactionErrorCode =
   | "SUI_OVER_BUDGET"
   | "SUI_VAULT_POLICY_MISMATCH"
   | "SUI_INSUFFICIENT_BALANCE"
+  | "SUI_MISSING_GAS"
+  | "SUI_OBJECT_NOT_FOUND"
   | "SUI_DEEPBOOK_ORDER_REJECTED"
   | "SUI_TRANSACTION_FAILED";
 
@@ -50,6 +52,30 @@ export function getSuiTransactionErrorDetails(error: unknown): SuiTransactionErr
     };
   }
 
+  if (/No valid gas coins|gas coin|insufficient gas/i.test(rawMessage)) {
+    return {
+      ...detail(
+        "SUI_MISSING_GAS",
+        "The signing wallet does not have enough SUI for gas.",
+        "Ask the owner or agent operator to add SUI for gas before retrying.",
+        "fund_gas_wallet"
+      ),
+      rawMessage
+    };
+  }
+
+  if (/ObjectNotFound|object.*not found|Could not find the referenced object/i.test(rawMessage)) {
+    return {
+      ...detail(
+        "SUI_OBJECT_NOT_FOUND",
+        "A required Sui object was not found. Refresh the Sui IDs and try again.",
+        "Refresh the policy, vault, pool, and balance manager IDs before retrying.",
+        "refresh_sui_object_ids"
+      ),
+      rawMessage
+    };
+  }
+
   const abortCode = extractMoveAbortCode(rawMessage);
   const policyError =
     abortCode === null || !isAgentWalletPolicyAbort(rawMessage) ? null : policyErrors[abortCode];
@@ -75,12 +101,12 @@ export function getSuiTransactionErrorDetails(error: unknown): SuiTransactionErr
   }
 
   return {
-    ...detail(
-      "SUI_TRANSACTION_FAILED",
-      "The Sui transaction failed.",
-      "Inspect the transaction details before retrying.",
-      "inspect_and_retry"
-    ),
+      ...detail(
+        "SUI_TRANSACTION_FAILED",
+        "Sui rejected the transaction. Check balances, policy status, and order settings before retrying.",
+        "Check balances, policy status, and order settings before retrying.",
+        "inspect_and_retry"
+      ),
     rawMessage
   };
 }
@@ -124,6 +150,60 @@ function getDeepBookValidationError(
     );
   }
 
+  if (abortCode === 0) {
+    return detail(
+      "SUI_DEEPBOOK_ORDER_REJECTED",
+      "The DeepBook limit price is invalid for this market.",
+      "Retry with a valid price for the selected DeepBook market.",
+      "adjust_order_price"
+    );
+  }
+
+  if (abortCode === 3) {
+    return detail(
+      "SUI_DEEPBOOK_ORDER_REJECTED",
+      "The DeepBook order expiry is invalid.",
+      "Retry with a future expiry timestamp or the default no-expiry value.",
+      "adjust_order_expiry"
+    );
+  }
+
+  if (abortCode === 4) {
+    return detail(
+      "SUI_DEEPBOOK_ORDER_REJECTED",
+      "The DeepBook order type is invalid.",
+      "Retry with a supported order type such as limit or market.",
+      "adjust_order_type"
+    );
+  }
+
+  if (abortCode === 5) {
+    return detail(
+      "SUI_DEEPBOOK_ORDER_REJECTED",
+      "The post-only order would immediately cross the book.",
+      "Use a limit price that rests on the book, or submit a market order.",
+      "adjust_post_only_price"
+    );
+  }
+
+  if (abortCode === 6) {
+    return detail(
+      "SUI_DEEPBOOK_ORDER_REJECTED",
+      "The fill-or-kill order could not be fully filled.",
+      "Reduce the order size or use market/immediate-or-cancel execution.",
+      "reduce_order_size"
+    );
+  }
+
+  if (abortCode === 7) {
+    return detail(
+      "SUI_DEEPBOOK_ORDER_REJECTED",
+      "DeepBook cannot place a market order as post-only.",
+      "Choose either market execution or post-only limit execution.",
+      "choose_valid_execution_mode"
+    );
+  }
+
   return null;
 }
 
@@ -134,7 +214,7 @@ function stringifyError(error: unknown) {
 }
 
 function lowercaseFirst(value: string) {
-  if (value.startsWith("DeepBook")) {
+  if (value.startsWith("DeepBook") || value.startsWith("Sui")) {
     return value;
   }
   return `${value.charAt(0).toLowerCase()}${value.slice(1)}`;

@@ -31,6 +31,18 @@ describe("explainSuiTransactionError", () => {
     );
   });
 
+  it("explains missing gas separately from vault balance", () => {
+    expect(explainSuiTransactionError("No valid gas coins found for signer")).toBe(
+      "Rejected: the signing wallet does not have enough SUI for gas."
+    );
+  });
+
+  it("explains missing Sui objects without leaking RPC wording", () => {
+    expect(explainSuiTransactionError("ObjectNotFound object_id: 0xabc")).toBe(
+      "Rejected: a required Sui object was not found. Refresh the Sui IDs and try again."
+    );
+  });
+
   it("does not treat a DeepBook abort code as an AgentWallet policy error", () => {
     expect(
       explainSuiTransactionError(
@@ -40,14 +52,26 @@ describe("explainSuiTransactionError", () => {
   });
 
   it.each([
+    [0, "Rejected: the DeepBook limit price is invalid for this market."],
     [1, "Rejected: this order is below DeepBook's minimum size."],
-    [2, "Rejected: this order does not match DeepBook's required lot size."]
+    [2, "Rejected: this order does not match DeepBook's required lot size."],
+    [3, "Rejected: the DeepBook order expiry is invalid."],
+    [4, "Rejected: the DeepBook order type is invalid."],
+    [5, "Rejected: the post-only order would immediately cross the book."],
+    [6, "Rejected: the fill-or-kill order could not be fully filled."],
+    [7, "Rejected: DeepBook cannot place a market order as post-only."]
   ])("explains DeepBook order validation abort code %i", (code, message) => {
     expect(
       explainSuiTransactionError(
         `MoveAbort in command 4, abort code: ${code}, in '0xdeepbook::order_info::validate_inputs'`
       )
     ).toBe(message);
+  });
+
+  it("turns generic transaction failure into a next-step message", () => {
+    expect(explainSuiTransactionError("Sui transaction failed.")).toBe(
+      "Rejected: Sui rejected the transaction. Check balances, policy status, and order settings before retrying."
+    );
   });
 
   it("returns structured details for agent integrations", () => {
