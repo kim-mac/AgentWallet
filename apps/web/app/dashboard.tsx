@@ -30,6 +30,7 @@ import {
   buildSuiDashboardCommands,
   canReviewSuiLaunchStage,
   describeSuiOrderAssetFlow,
+  describeSuiSettlementEvidence,
   findSuiDeepBookMarketId,
   getSuiFundingReadiness,
   getSuiGasReadiness,
@@ -3046,7 +3047,7 @@ function SuiView() {
       id: "sui-agent-intro",
       role: "agent",
       content:
-        "Give me a rule-based action: market buy 0.1 SUI of DEEP, limit buy 0.1 SUI of DEEP, show budget, show orders, or test over budget.",
+        "Give me a rule-based action: market buy 0.1 SUI of DEEP, market sell 0.1 SUI for USDC, show budget, show orders, or test over budget.",
       status: "info"
     }
   ]);
@@ -3061,6 +3062,9 @@ function SuiView() {
   const [isFetchingBalances, setIsFetchingBalances] = useState(false);
   const parsedSuiMandate = useMemo(() => parseSuiAgentMandate(suiMandate), [suiMandate]);
   const selectedSuiMarketId = useMemo(() => findSuiDeepBookMarketId(config), [config]);
+  const selectedSuiMarketLabel = getSuiMarketDisplayLabel(config);
+  const selectedSuiAcquiredAssetLabel = getSuiAcquiredAssetLabel(config);
+  const selectedSuiAcquiredAssetType = getSuiAcquiredAssetType(config);
   const [encryptedSuiWallets, setEncryptedSuiWallets] = useState<EncryptedSuiLocalWalletBundle | null>(null);
   const [unlockedSuiWallets, setUnlockedSuiWallets] = useState<SuiLocalWalletBundle | null>(null);
   const [suiWalletPassword, setSuiWalletPassword] = useState("");
@@ -3185,7 +3189,7 @@ function SuiView() {
       !configOverride.allowedPoolId.trim()
     ) {
       setDeepBookOrderStatus("DeepBook package, pool, and balance manager IDs are required.");
-      return;
+      return [] as SuiDeepBookOrder[];
     }
 
     try {
@@ -3198,9 +3202,11 @@ function SuiView() {
           deepbookPackageId: configOverride.deepbookPackageId,
           balanceManagerId: configOverride.balanceManagerId,
           poolId: configOverride.allowedPoolId,
-          marketLabel: "DEEP / SUI",
+          marketLabel: getSuiMarketDisplayLabel(configOverride),
           transactionDigest: configOverride.lastDeepBookTransactionDigest,
-          executionHint: configOverride.orderExecution
+          executionHint: configOverride.orderExecution,
+          sideHint: configOverride.orderSide === "ask" ? "sell" : "buy",
+          balanceOwnerAddress: configOverride.agentAddress
         })
       });
       const payload = await readJsonResponse<{ orders: SuiDeepBookOrder[] }>(response);
@@ -3210,8 +3216,10 @@ function SuiView() {
           ? `Loaded ${payload.orders.length} DeepBook order${payload.orders.length === 1 ? "" : "s"}.`
           : "No matching DeepBook order events found yet."
       );
+      return payload.orders;
     } catch (error) {
       setDeepBookOrderStatus(getErrorMessage(error));
+      return [] as SuiDeepBookOrder[];
     } finally {
       setIsFetchingDeepBookOrders(false);
     }
@@ -3248,7 +3256,7 @@ function SuiView() {
         body: JSON.stringify({
           owner: encryptedSuiWallets.ownerAddress,
           agent: encryptedSuiWallets.agentAddress,
-          deepType: config.deepbookBaseType
+          deepType: selectedSuiAcquiredAssetType
         })
       });
       const balances = await readJsonResponse<{ ownerBalance: string; agentBalance: string; agentDeepBalance?: string }>(response);
@@ -3407,7 +3415,7 @@ function SuiView() {
       setSuiActionStatus(
         command.kind === "test-over-budget"
           ? "Agent is deliberately testing the on-chain budget ceiling..."
-          : `Agent is submitting a ${command.execution} ${command.side} order through the Move policy...`
+          : `Agent is submitting a ${command.execution} ${command.side} order on ${selectedSuiMarketLabel} through the Move policy...`
       );
       const result = await submitSuiDashboardAction({
         action: "run-deepbook-strategy",
@@ -3463,15 +3471,20 @@ function SuiView() {
       });
       setConfig(nextConfig);
       setSuiActionExplorerUrl(result.explorerUrl);
-      setSuiActionStatus(`Agent ${command.execution} ${command.side} order confirmed on Sui testnet: ${result.digest}.`);
+      setSuiActionStatus(`Agent transaction confirmed on Sui testnet. Verifying DeepBook settlement evidence...`);
+      await fetchSuiActivity(nextConfig);
+      const settlementOrders = await fetchDeepBookOrders(nextConfig);
+      const settlementOrder =
+        settlementOrders.find((order) => order.digest === result.digest || order.orderId === result.digest) ??
+        null;
+      const settlementMessage = describeSuiSettlementEvidence(settlementOrder);
       appendSuiAgentMessage({
         role: "agent",
-        content: `${command.execution === "market" ? "Market" : "Limit"} ${command.side} order approved by the Move policy and submitted to DeepBook. Asset route: ${describeSuiOrderAssetFlow("DEEP / SUI", command.side)}.`,
+        content: `Policy approved the ${command.execution} ${command.side} action. ${settlementMessage}`,
         explorerUrl: result.explorerUrl,
-        status: "approved"
+        status: settlementOrder?.isSettled || settlementOrder?.status === "open" ? "approved" : "info"
       });
-      await fetchSuiActivity(nextConfig);
-      await fetchDeepBookOrders(nextConfig);
+      setSuiActionStatus(settlementMessage);
       await fetchSuiBalances();
     } catch (error) {
       const message = getErrorMessage(error);
@@ -3622,6 +3635,8 @@ function SuiView() {
       ownerBalance={ownerSuiBalance}
       agentBalance={agentSuiBalance}
       agentDeepBalance={agentDeepBalance}
+      acquiredAssetLabel={selectedSuiAcquiredAssetLabel}
+      marketLabel={selectedSuiMarketLabel}
       requiredOwnerBalance={suiGasReadiness.requiredOwnerBalance}
       requiredAgentBalance={suiGasReadiness.requiredAgentBalance}
       balanceStatus={balanceStatus}
@@ -4097,6 +4112,8 @@ function SuiGuidedDashboard({
   ownerBalance,
   agentBalance,
   agentDeepBalance,
+  acquiredAssetLabel,
+  marketLabel,
   requiredOwnerBalance,
   requiredAgentBalance,
   balanceStatus,
@@ -4142,6 +4159,8 @@ function SuiGuidedDashboard({
   ownerBalance: string;
   agentBalance: string;
   agentDeepBalance: string;
+  acquiredAssetLabel: string;
+  marketLabel: string;
   requiredOwnerBalance: string;
   requiredAgentBalance: string;
   balanceStatus: string;
@@ -4207,26 +4226,6 @@ function SuiGuidedDashboard({
 
   return (
     <section className="sui-guided-shell">
-      <section className="panel sui-launch-header">
-        <div>
-          <span className="eyebrow">Sui autonomous agent wallet</span>
-          <h2>{isLive ? "Your agent is live." : "Launch an autonomous DeepBook agent."}</h2>
-          <p className="section-note">
-            Set one mandate. AgentWallet handles pool selection, Move policy creation, vault setup, and autonomous execution.
-          </p>
-        </div>
-        <div className="button-row compact">
-          {isReviewing ? (
-            <button className="button secondary small" type="button" onClick={() => setReviewStage(null)}>
-              Return to current step
-            </button>
-          ) : null}
-          <span className={`registry-status ${isLive ? "initialized" : "pending"}`}>
-            {isReviewing ? "reviewing history" : isLive ? "policy active" : `step ${activeIndex + 1} of ${steps.length}`}
-          </span>
-        </div>
-      </section>
-
       <nav className="sui-stepper" aria-label="Sui setup progress">
         {steps.map(([id, label], index) => (
           <button
@@ -4320,7 +4319,7 @@ function SuiGuidedDashboard({
         <section className="panel sui-focus-card">
           <span className="eyebrow">Step 5 · Agent mandate</span>
           <h2>Tell the agent its limits</h2>
-          <p className="section-note">AgentWallet automatically selects the verified DEEP/SUI pool and translates this instruction into a Move policy.</p>
+          <p className="section-note">AgentWallet applies the selected verified {marketLabel} pool and translates this instruction into a Move policy.</p>
           <EditableField label="Instruction to agent" value={mandate} onChange={setMandate} help="Examples: max 0.5 SUI, DeepBook only, expires 5m · expires 24h" />
           <div className="setup-grid">
             <SuiSummaryCard label="Budget" value={parsedMandate.budgetLabel} />
@@ -4340,7 +4339,7 @@ function SuiGuidedDashboard({
           <div className="setup-grid">
             <SuiSummaryCard label="Maximum budget" value={parsedMandate.budgetLabel} />
             <SuiSummaryCard label="Vault deposit" value={parsedMandate.budgetLabel} />
-            <SuiSummaryCard label="Allowed venue" value="DeepBook · DEEP/SUI" />
+            <SuiSummaryCard label="Allowed venue" value={`DeepBook · ${marketLabel}`} />
             <SuiSummaryCard label="Policy duration" value={parsedMandate.durationLabel} />
           </div>
           <p className="section-note">
@@ -4358,7 +4357,6 @@ function SuiGuidedDashboard({
 
       {!isReviewing && isLive ? (
         <>
-          <SuiProofOverview summary={proofSummary} />
           <section className="panel">
             <div className="section-header">
               <div>
@@ -4371,7 +4369,7 @@ function SuiGuidedDashboard({
             </div>
             <div className="setup-grid">
               <SuiSummaryCard label="Agent SUI gas" value={`${formatSuiBalance(agentBalance)} SUI`} />
-              <SuiSummaryCard label="Agent DEEP balance" value={formatSuiTokenAmount(agentDeepBalance, "DEEP")} />
+              <SuiSummaryCard label={`Agent ${acquiredAssetLabel} balance`} value={formatSuiTokenAmount(agentDeepBalance, acquiredAssetLabel)} />
               <SuiSummaryCard label="Owner SUI balance" value={`${formatSuiBalance(ownerBalance)} SUI`} />
             </div>
             <p className="inline-status"><Info size={15} /> {balanceStatus}</p>
@@ -4394,9 +4392,9 @@ function SuiGuidedDashboard({
                 label="Budget ceiling"
                 value={proofSummary.budget.max}
               />
-              <SuiSummaryCard label="Agent DEEP balance" value={formatSuiTokenAmount(agentDeepBalance, "DEEP")} />
+              <SuiSummaryCard label={`Agent ${acquiredAssetLabel} balance`} value={formatSuiTokenAmount(agentDeepBalance, acquiredAssetLabel)} />
               <SuiSummaryCard label="Policy status" value={proofSummary.status.detail} />
-              <SuiSummaryCard label="Market" value="DeepBook · DEEP/SUI" />
+              <SuiSummaryCard label="Market" value={`DeepBook · ${marketLabel}`} />
               <SuiSummaryCard label="Latest action" value={progress.at(-1) ?? "Waiting"} />
             </div>
             <div className="sui-agent-command-console">
@@ -4426,13 +4424,13 @@ function SuiGuidedDashboard({
                 label="Agent command"
                 value={agentCommand}
                 onChange={setAgentCommand}
-                help="Rule-based examples: market buy 0.1 SUI of DEEP · limit buy 0.1 SUI of DEEP · show budget · test over budget"
+                help={`Rule-based examples: ${getSuiAgentExamples(marketLabel).join(" · ")}`}
               />
               <div className="button-row">
                 <button className="button" type="button" disabled={isAgentExecuting || !agentCommand.trim()} onClick={submitAgentCommand}>
                   <Bot size={17} /> {isAgentExecuting ? "Agent executing..." : "Run agent action"}
                 </button>
-                {["market buy 0.1 SUI of DEEP", "limit buy 0.1 SUI of DEEP", "show budget", "test over budget"].map((example) => (
+                {getSuiAgentExamples(marketLabel).map((example) => (
                   <button className="button secondary small" type="button" key={example} onClick={() => setAgentCommand(example)}>
                     {example}
                   </button>
@@ -4587,6 +4585,7 @@ function SuiStepReview({
     launch: "Approved launch configuration",
     console: "Live autonomous proof"
   };
+  const marketLabel = getSuiMarketDisplayLabel(config);
 
   return (
     <section className="panel sui-focus-card sui-review-card">
@@ -4615,7 +4614,7 @@ function SuiStepReview({
       {stage === "mandate" || stage === "launch" ? (
         <div className="setup-grid">
           <SuiSummaryCard label="Maximum budget" value={parsedMandate.budgetLabel} />
-          <SuiSummaryCard label="Allowed venue" value="DeepBook · DEEP/SUI" />
+          <SuiSummaryCard label="Allowed venue" value={`DeepBook · ${marketLabel}`} />
           <SuiSummaryCard label="Policy duration" value={parsedMandate.durationLabel} />
         </div>
       ) : null}
@@ -4811,6 +4810,9 @@ function SuiDeepBookOrders({ orders }: { orders: SuiDeepBookOrder[] }) {
               Swap {order.assetFlow} - {order.amountEvidence}
             </p>
             <p>
+              Evidence: {order.settlementEvidence}. {order.isSettled ? "Settlement verified." : "Settlement not complete."}
+            </p>
+            <p>
               Pool {shortAddress(order.poolId)} - order {order.orderId} - price {order.price} - tx {shortAddress(order.digest)}
             </p>
             {order.digest ? (
@@ -4824,7 +4826,7 @@ function SuiDeepBookOrders({ orders }: { orders: SuiDeepBookOrder[] }) {
               </a>
             ) : null}
           </div>
-          <span className={`decision-pill ${order.status === "filled" ? "sim-passed" : ""}`}>{order.status}</span>
+          <span className={`decision-pill ${order.status === "filled" ? "sim-passed" : order.status === "unfilled" || order.status === "cancelled" || order.status === "expired" ? "sim-failed" : ""}`}>{order.status}</span>
         </div>
       ))}
     </div>
@@ -5774,6 +5776,45 @@ function getErrorMessage(error: unknown) {
   }
 
   return "The wallet action was cancelled.";
+}
+
+function getSuiMarketDisplayLabel(config: SuiDashboardConfig) {
+  const marketId = findSuiDeepBookMarketId(config);
+  const market = suiDeepBookMarkets.find((candidate) => candidate.id === marketId);
+  if (market) {
+    return market.label;
+  }
+
+  return `${getSuiCoinTypeLabel(config.deepbookBaseType)} / ${getSuiCoinTypeLabel(config.deepbookQuoteType)}`;
+}
+
+function getSuiAcquiredAssetType(config: SuiDashboardConfig) {
+  return config.orderSide === "ask" ? config.deepbookQuoteType : config.deepbookBaseType;
+}
+
+function getSuiAcquiredAssetLabel(config: SuiDashboardConfig) {
+  return getSuiCoinTypeLabel(getSuiAcquiredAssetType(config));
+}
+
+function getSuiCoinTypeLabel(type: string) {
+  if (/::DBUSDC::DBUSDC$/i.test(type)) {
+    return "USDC";
+  }
+  if (/::deep::DEEP$/i.test(type)) {
+    return "DEEP";
+  }
+  if (/::sui::SUI$/i.test(type)) {
+    return "SUI";
+  }
+
+  const [fallback] = type.split("::").slice(-1);
+  return fallback?.replace(/[^a-z0-9]/gi, "") || "asset";
+}
+
+function getSuiAgentExamples(marketLabel: string) {
+  return marketLabel.includes("USDC")
+    ? ["market sell 0.1 SUI for USDC", "limit sell 0.1 SUI for USDC", "show budget", "test over budget"]
+    : ["market buy 0.1 SUI of DEEP", "limit buy 0.1 SUI of DEEP", "show budget", "test over budget"];
 }
 
 function suiDemoStepLabel(action: SuiDashboardActionId) {

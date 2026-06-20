@@ -12,7 +12,7 @@ import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import type { SuiDashboardConfig } from "./sui-dashboard";
-import { normalizeSuiDashboardConfig } from "./sui-dashboard";
+import { deepbookDeepType, normalizeSuiDashboardConfig } from "./sui-dashboard";
 import { explainSuiTransactionError } from "./sui-errors";
 
 export type SuiDashboardActionId =
@@ -137,11 +137,13 @@ export function buildSuiDashboardActionPlan(
         balanceManagerId: config.balanceManagerId,
         baseAssetType: config.deepbookBaseType,
         quoteAssetType: config.deepbookQuoteType,
+        deepFeeAssetType: deepbookDeepType,
         orderType: config.orderSide,
-        deepBookOrderType: config.orderExecution === "market" ? "1" : "0",
+        execution: config.orderExecution,
         price: config.limitPrice,
         quantity: config.orderQuantity,
-        clockId: defaultDeepBookClockId
+        clockId: defaultDeepBookClockId,
+        settleToAddress: config.agentAddress
       })
     };
   }

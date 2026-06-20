@@ -19,6 +19,8 @@ export async function POST(request: Request) {
     marketLabel?: unknown;
     transactionDigest?: unknown;
     executionHint?: unknown;
+    sideHint?: unknown;
+    balanceOwnerAddress?: unknown;
   };
   const deepbookPackageId =
     typeof body.deepbookPackageId === "string" ? body.deepbookPackageId.trim() : "";
@@ -30,6 +32,10 @@ export async function POST(request: Request) {
     typeof body.transactionDigest === "string" ? body.transactionDigest.trim() : "";
   const executionHint =
     body.executionHint === "market" || body.executionHint === "limit" ? body.executionHint : undefined;
+  const sideHint =
+    body.sideHint === "buy" || body.sideHint === "sell" ? body.sideHint : undefined;
+  const balanceOwnerAddress =
+    typeof body.balanceOwnerAddress === "string" ? body.balanceOwnerAddress.trim() : "";
 
   if (!deepbookPackageId || !balanceManagerId || !poolId) {
     return NextResponse.json(
@@ -67,7 +73,9 @@ export async function POST(request: Request) {
         poolId,
         marketLabel,
         transactionDigest,
-        executionHint
+        executionHint,
+        sideHint,
+        balanceOwnerAddress
       })
     });
   } catch (error) {

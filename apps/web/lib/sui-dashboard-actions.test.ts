@@ -143,7 +143,7 @@ describe("Sui dashboard actions", () => {
     });
   });
 
-  it("builds a market strategy as a DeepBook immediate-or-cancel order", () => {
+  it("builds a market strategy as an exact-quote DeepBook swap that returns output", () => {
     const action = buildSuiDashboardActionPlan("run-deepbook-strategy", {
       ...baseConfig,
       deepbookPackageId: "0xdeepbook",
@@ -151,9 +151,18 @@ describe("Sui dashboard actions", () => {
       orderExecution: "market"
     });
 
-    const orderCommand = action.plan.commands[3];
-    expect(orderCommand).toMatchObject({ kind: "moveCall" });
-    expect(orderCommand?.kind === "moveCall" ? orderCommand.arguments[4] : null).toBe("1");
+    const orderCommand = action.plan.commands[2];
+    expect(orderCommand).toMatchObject({
+      kind: "moveCall",
+      target: "0xdeepbook::pool::swap_exact_quote_for_base",
+      arguments: ["0xpool", "$agentwalletCoin", "$deepbookFeeCoin", "1", "0x6"],
+      resultNames: ["deepbookBaseOut", "deepbookQuoteOut", "deepbookFeeOut"]
+    });
+    expect(action.plan.commands[3]).toEqual({
+      kind: "transferObjects",
+      objects: ["$deepbookBaseOut", "$deepbookQuoteOut", "$deepbookFeeOut"],
+      recipient: "0xagent"
+    });
   });
 
   it("merges policy and vault object ids from successful transaction results", () => {

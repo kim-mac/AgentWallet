@@ -6,6 +6,7 @@ import {
   buildSuiDeepBookEventRpcRequest,
   buildSuiTransactionBlockRpcRequest,
   canReviewSuiLaunchStage,
+  describeSuiSettlementEvidence,
   describeSuiOrderAssetFlow,
   buildSuiEventRpcRequest,
   getSuiLaunchStage,
@@ -26,6 +27,7 @@ import {
   resolveSuiActivityConfig,
   suiActivityEventLabels,
   suiDeepBookMarkets,
+  deepbookTestnetUsdcType,
   suiOverflowProofItems
 } from "./sui-dashboard";
 
@@ -261,6 +263,19 @@ describe("Sui dashboard helpers", () => {
         quoteAssetType: "0x2::sui::SUI"
       })
     );
+    expect(suiDeepBookMarkets).toContainEqual(
+      expect.objectContaining({
+        id: "sui-usdc-testnet",
+        label: "SUI / USDC",
+        network: "testnet",
+        poolId: "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5",
+        coinType: "0x2::sui::SUI",
+        tokenTypeLabel: "SUI",
+        baseAssetType: "0x2::sui::SUI",
+        quoteAssetType: "0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC",
+        defaultOrderSide: "ask"
+      })
+    );
   });
 
   it("applies a selected DeepBook market without replacing owner proof state", () => {
@@ -293,6 +308,36 @@ describe("Sui dashboard helpers", () => {
     expect(findSuiDeepBookMarketId({ ...config, allowedPoolId: "0xcustom" })).toBe("custom");
   });
 
+  it("applies the SUI/USDC DeepBook market for SUI-funded agent strategies", () => {
+    const config = applySuiDeepBookMarket(
+      normalizeSuiDashboardConfig({
+        packageId: "0xagentwallet",
+        policyId: "0xpolicy",
+        vaultId: "0xvault",
+        agentAddress: "0xagent",
+        balanceManagerId: "0xmanager"
+      }),
+      "sui-usdc-testnet"
+    );
+
+    expect(config).toMatchObject({
+      packageId: "0xagentwallet",
+      policyId: "0xpolicy",
+      vaultId: "0xvault",
+      agentAddress: "0xagent",
+      balanceManagerId: "0xmanager",
+      allowedPoolId: "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5",
+      coinType: "0x2::sui::SUI",
+      tokenTypeLabel: "SUI",
+      deepbookBaseType: "0x2::sui::SUI",
+      deepbookQuoteType: "0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC",
+      spendAmount: "100000000",
+      orderQuantity: "100000000",
+      orderSide: "ask"
+    });
+    expect(findSuiDeepBookMarketId(config)).toBe("sui-usdc-testnet");
+  });
+
   it("builds a Sui event query for the AgentWallet Move module", () => {
     expect(buildSuiEventRpcRequest({ packageId: "0xpackage" })).toEqual({
       jsonrpc: "2.0",
@@ -316,7 +361,10 @@ describe("Sui dashboard helpers", () => {
       jsonrpc: "2.0",
       id: 1,
       method: "sui_getTransactionBlock",
-      params: ["strategy-digest", { showEvents: true }]
+      params: [
+        "strategy-digest",
+        { showEvents: true, showObjectChanges: true, showBalanceChanges: true }
+      ]
     });
   });
 
@@ -444,6 +492,9 @@ describe("Sui dashboard helpers", () => {
         orderId: "agent-order",
         assetFlow: "SUI -> DEEP",
         amountEvidence: "50 SUI -> 5 DEEP",
+        status: "partially filled",
+        settlementEvidence: "deepbook event",
+        isSettled: false,
         transactionUrl: "https://suiexplorer.com/txblock/fill?network=testnet"
       })
     ]);
@@ -477,6 +528,8 @@ describe("Sui dashboard helpers", () => {
       expect.objectContaining({
         orderId: "184467440755542260233709280272",
         status: "open",
+        settlementEvidence: "deepbook event",
+        isSettled: false,
         digest: "strategy-digest"
       })
     ]);
@@ -558,6 +611,368 @@ describe("Sui dashboard helpers", () => {
         digest: "market-digest"
       })
     ]);
+  });
+
+  it("creates unfilled market swap evidence when DeepBook emits no order events and no base asset was received", () => {
+    const orders = parseSuiDeepBookOrders(
+      [{
+        result: {
+          digest: "swap-digest",
+          balanceChanges: [
+            { coinType: "0x2::sui::SUI", amount: "94912720" }
+          ],
+          events: [
+            {
+              id: { txDigest: "swap-digest", eventSeq: "0" },
+              type: "0xagentwallet::policy::AgentBudgetUsed",
+              parsedJson: {
+                amount: "100000000",
+                pool_id: "0xpool",
+                remaining_budget: "100000000",
+                timestamp_ms: "1781844808601"
+              }
+            }
+          ]
+        }
+      }],
+      {
+        balanceManagerId: "0xmanager",
+        poolId: "0xpool",
+        marketLabel: "DEEP / SUI",
+        transactionDigest: "swap-digest",
+        executionHint: "market"
+      }
+    );
+
+    expect(orders).toEqual([
+      expect.objectContaining({
+        orderId: "swap-digest",
+        execution: "market",
+        side: "buy",
+        assetFlow: "SUI -> DEEP",
+        status: "unfilled",
+        settlementEvidence: "transaction only",
+        isSettled: false,
+        amountEvidence: "100000000 SUI submitted; no DEEP filled",
+        digest: "swap-digest"
+      })
+    ]);
+  });
+
+  it("creates filled market swap evidence from exact transaction base balance changes", () => {
+    const orders = parseSuiDeepBookOrders(
+      [{
+        result: {
+          digest: "filled-swap-digest",
+          balanceChanges: [
+            { coinType: "0x36db::deep::DEEP", amount: "2500000" }
+          ],
+          events: [
+            {
+              id: { txDigest: "filled-swap-digest", eventSeq: "0" },
+              type: "0xagentwallet::policy::AgentBudgetUsed",
+              parsedJson: {
+                amount: "100000000",
+                pool_id: "0xpool",
+                remaining_budget: "100000000",
+                timestamp_ms: "1781844808601"
+              }
+            }
+          ]
+        }
+      }],
+      {
+        balanceManagerId: "0xmanager",
+        poolId: "0xpool",
+        marketLabel: "DEEP / SUI",
+        transactionDigest: "filled-swap-digest",
+        executionHint: "market"
+      }
+    );
+
+    expect(orders).toEqual([
+      expect.objectContaining({
+        orderId: "filled-swap-digest",
+        execution: "market",
+        status: "filled",
+        settlementEvidence: "balance change",
+        isSettled: true,
+        baseQuantity: "2500000",
+        amountEvidence: "100000000 SUI -> 2500000 DEEP",
+        digest: "filled-swap-digest"
+      })
+    ]);
+  });
+
+  it("creates filled market swap evidence for SUI to USDC market sells from quote balance changes", () => {
+    const orders = parseSuiDeepBookOrders(
+      [{
+        result: {
+          digest: "sui-usdc-swap-digest",
+          balanceChanges: [
+            { coinType: deepbookTestnetUsdcType, amount: "70000" }
+          ],
+          events: [
+            {
+              id: { txDigest: "sui-usdc-swap-digest", eventSeq: "0" },
+              type: "0xagentwallet::policy::AgentBudgetUsed",
+              parsedJson: {
+                amount: "100000000",
+                pool_id: "0xpool",
+                remaining_budget: "400000000",
+                timestamp_ms: "1781844808601"
+              }
+            }
+          ]
+        }
+      }],
+      {
+        balanceManagerId: "0xmanager",
+        poolId: "0xpool",
+        marketLabel: "SUI / USDC",
+        transactionDigest: "sui-usdc-swap-digest",
+        executionHint: "market",
+        sideHint: "sell"
+      }
+    );
+
+    expect(orders).toEqual([
+      expect.objectContaining({
+        orderId: "sui-usdc-swap-digest",
+        execution: "market",
+        side: "sell",
+        status: "filled",
+        settlementEvidence: "balance change",
+        isSettled: true,
+        assetFlow: "SUI -> USDC",
+        baseQuantity: "100000000",
+        quoteQuantity: "70000",
+        amountEvidence: "100000000 SUI -> 70000 USDC",
+        digest: "sui-usdc-swap-digest"
+      })
+    ]);
+  });
+
+  it("uses only the configured agent balance change as settlement evidence", () => {
+    const orders = parseSuiDeepBookOrders(
+      [{
+        result: {
+          digest: "owned-swap-digest",
+          balanceChanges: [
+            {
+              owner: { AddressOwner: "0xother" },
+              coinType: deepbookTestnetUsdcType,
+              amount: "999999"
+            },
+            {
+              owner: { AddressOwner: "0xagent" },
+              coinType: deepbookTestnetUsdcType,
+              amount: "70000"
+            }
+          ],
+          events: [{
+            id: { txDigest: "owned-swap-digest", eventSeq: "0" },
+            type: "0xagentwallet::policy::AgentBudgetUsed",
+            parsedJson: {
+              amount: "100000000",
+              pool_id: "0xpool",
+              timestamp_ms: "2"
+            }
+          }]
+        }
+      }],
+      {
+        balanceManagerId: "0xmanager",
+        balanceOwnerAddress: "0xagent",
+        poolId: "0xpool",
+        marketLabel: "SUI / USDC",
+        transactionDigest: "owned-swap-digest",
+        executionHint: "market",
+        sideHint: "sell"
+      }
+    );
+
+    expect(orders[0]).toMatchObject({
+      status: "filled",
+      quoteQuantity: "70000",
+      amountEvidence: "100000000 SUI -> 70000 USDC"
+    });
+  });
+
+  it("keeps partial settlement evidence when a partially filled order is later cancelled", () => {
+    const orders = parseSuiDeepBookOrders(
+      [{
+        result: {
+          data: [
+            {
+              id: { txDigest: "fill", eventSeq: "0" },
+              type: "0xdeepbook::order_info::OrderFilled",
+              parsedJson: {
+                taker_order_id: "partial-order",
+                taker_balance_manager_id: "0xagent",
+                pool_id: "0xpool",
+                taker_is_bid: true,
+                base_quantity: "5",
+                quote_quantity: "50",
+                timestamp: "1"
+              }
+            },
+            {
+              id: { txDigest: "cancel", eventSeq: "1" },
+              type: "0xdeepbook::order_info::OrderCanceled",
+              parsedJson: {
+                order_id: "partial-order",
+                balance_manager_id: "0xagent",
+                pool_id: "0xpool",
+                timestamp: "2"
+              }
+            }
+          ]
+        }
+      }],
+      { balanceManagerId: "0xagent", poolId: "0xpool", marketLabel: "DEEP / SUI" }
+    );
+
+    expect(orders).toEqual([
+      expect.objectContaining({
+        orderId: "partial-order",
+        status: "partially filled",
+        isSettled: false,
+        settlementEvidence: "deepbook event",
+        amountEvidence: "50 SUI -> 5 DEEP"
+      })
+    ]);
+  });
+
+  it("creates submitted evidence for a confirmed limit transaction before an order event is indexed", () => {
+    const orders = parseSuiDeepBookOrders(
+      [{
+        result: {
+          digest: "limit-digest",
+          events: [{
+            id: { txDigest: "limit-digest", eventSeq: "0" },
+            type: "0xagentwallet::policy::AgentBudgetUsed",
+            parsedJson: {
+              amount: "100000000",
+              pool_id: "0xpool",
+              timestamp_ms: "1781844808601"
+            }
+          }]
+        }
+      }],
+      {
+        balanceManagerId: "0xmanager",
+        poolId: "0xpool",
+        marketLabel: "SUI / USDC",
+        transactionDigest: "limit-digest",
+        executionHint: "limit",
+        sideHint: "sell"
+      }
+    );
+
+    expect(orders).toEqual([
+      expect.objectContaining({
+        orderId: "limit-digest",
+        execution: "limit",
+        status: "submitted",
+        settlementEvidence: "transaction only",
+        isSettled: false,
+        amountEvidence: "100000000 SUI submitted; awaiting DeepBook order evidence"
+      })
+    ]);
+  });
+
+  it("keeps current transaction evidence separate from older indexed orders", () => {
+    const orders = parseSuiDeepBookOrders(
+      [
+        {
+          result: {
+            data: [{
+              id: { txDigest: "old-digest", eventSeq: "0" },
+              type: "0xdeepbook::order_info::OrderPlaced",
+              parsedJson: {
+                balance_manager_id: "0xmanager",
+                pool_id: "0xpool",
+                order_id: "old-order",
+                is_bid: false,
+                placed_quantity: "50000000",
+                timestamp: "1"
+              }
+            }]
+          }
+        },
+        {
+          result: {
+            digest: "current-digest",
+            events: [{
+              id: { txDigest: "current-digest", eventSeq: "0" },
+              type: "0xagentwallet::policy::AgentBudgetUsed",
+              parsedJson: {
+                amount: "100000000",
+                pool_id: "0xpool",
+                timestamp_ms: "2"
+              }
+            }]
+          }
+        }
+      ],
+      {
+        balanceManagerId: "0xmanager",
+        poolId: "0xpool",
+        marketLabel: "SUI / USDC",
+        transactionDigest: "current-digest",
+        executionHint: "market",
+        sideHint: "sell"
+      }
+    );
+
+    expect(orders.map((order) => [order.digest, order.status])).toEqual([
+      ["current-digest", "unfilled"],
+      ["old-digest", "open"]
+    ]);
+  });
+
+  it("describes settlement conservatively from the strongest available evidence", () => {
+    const baseOrder = {
+      orderId: "order",
+      market: "SUI / USDC",
+      poolId: "0xpool",
+      side: "sell" as const,
+      execution: "market" as const,
+      assetFlow: "SUI -> USDC",
+      baseAsset: "SUI",
+      quoteAsset: "USDC",
+      baseQuantity: "100000000",
+      quoteQuantity: "70000",
+      amountEvidence: "100000000 SUI -> 70000 USDC",
+      price: "market",
+      quantity: "market",
+      digest: "digest",
+      transactionUrl: "https://example.com",
+      timestampMs: "1"
+    };
+
+    expect(describeSuiSettlementEvidence({
+      ...baseOrder,
+      status: "filled",
+      settlementEvidence: "balance change",
+      isSettled: true
+    })).toBe("Swap filled and verified by balance change: 100000000 SUI -> 70000 USDC.");
+    expect(describeSuiSettlementEvidence({
+      ...baseOrder,
+      status: "open",
+      settlementEvidence: "deepbook event",
+      isSettled: false
+    })).toBe("Limit order is open on DeepBook. No swap settlement has occurred yet.");
+    expect(describeSuiSettlementEvidence({
+      ...baseOrder,
+      status: "unfilled",
+      settlementEvidence: "transaction only",
+      isSettled: false
+    })).toBe("Transaction confirmed, but no USDC was received. The market swap was not filled.");
+    expect(describeSuiSettlementEvidence(null)).toBe(
+      "Transaction confirmed, but settlement evidence is not indexed yet. Refresh Agent orders before treating it as filled."
+    );
   });
 
   it("ignores click-event-shaped activity overrides and uses the current config", () => {
@@ -789,6 +1204,8 @@ describe("Sui dashboard helpers", () => {
           quoteQuantity: "100000000",
           amountEvidence: "100000000 SUI -> 10000000 DEEP",
           status: "open",
+          settlementEvidence: "deepbook event",
+          isSettled: false,
           price: "10000000000",
           quantity: "10000000",
           digest: "order-digest",

@@ -47,6 +47,7 @@ export type SuiDeepBookMarket = {
   defaultSpendAmount: string;
   defaultOrderQuantity: string;
   defaultLimitPrice: string;
+  defaultOrderSide?: "bid" | "ask";
 };
 
 export type SuiActivityEvent = {
@@ -71,7 +72,9 @@ export type SuiDeepBookOrder = {
   baseQuantity: string;
   quoteQuantity: string;
   amountEvidence: string;
-  status: "open" | "filled" | "cancelled" | "expired" | "fill observed";
+  status: "submitted" | "open" | "partially filled" | "filled" | "unfilled" | "cancelled" | "expired";
+  settlementEvidence: "transaction only" | "deepbook event" | "balance change";
+  isSettled: boolean;
   price: string;
   quantity: string;
   digest: string;
@@ -129,6 +132,8 @@ export const agentWalletSuiPackageId =
 export const deepbookDeepType =
   "0x36dbef866a1d62bf7328989a10fb2f07d769f4ee587c0de4a0a256e57e0a58a8::deep::DEEP";
 export const suiType = "0x2::sui::SUI";
+export const deepbookTestnetUsdcType =
+  "0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC";
 export const suiGasReserveMist = 50_000_000n;
 export const suiDeepBookMarkets: SuiDeepBookMarket[] = [
   {
@@ -145,6 +150,22 @@ export const suiDeepBookMarkets: SuiDeepBookMarket[] = [
     defaultSpendAmount: "100000000",
     defaultOrderQuantity: "10000000",
     defaultLimitPrice: "10000000000"
+  },
+  {
+    id: "sui-usdc-testnet",
+    label: "SUI / USDC",
+    network: "testnet",
+    description: "Verified DeepBook V3 testnet SUI/DBUSDC market for SUI-funded agent swaps into USDC.",
+    deepbookPackageId: "0xbc331f09e5c737d45f074ad2d17c3038421b3b9018699e370d88d94938c53d28",
+    poolId: "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5",
+    coinType: suiType,
+    tokenTypeLabel: "SUI",
+    baseAssetType: suiType,
+    quoteAssetType: deepbookTestnetUsdcType,
+    defaultSpendAmount: "100000000",
+    defaultOrderQuantity: "100000000",
+    defaultLimitPrice: "700000",
+    defaultOrderSide: "ask"
   }
 ];
 const defaultSuiDashboardConfig: SuiDashboardConfig = {
@@ -502,7 +523,8 @@ export function applySuiDeepBookMarket(
     deepbookQuoteType: market.quoteAssetType,
     spendAmount: market.defaultSpendAmount,
     orderQuantity: market.defaultOrderQuantity,
-    limitPrice: market.defaultLimitPrice
+    limitPrice: market.defaultLimitPrice,
+    orderSide: market.defaultOrderSide ?? config.orderSide
   };
 }
 
@@ -666,7 +688,14 @@ export function buildSuiTransactionBlockRpcRequest(digest: string) {
     jsonrpc: "2.0" as const,
     id: 1 as const,
     method: "sui_getTransactionBlock" as const,
-    params: [digest.trim(), { showEvents: true }] as [string, { showEvents: true }]
+    params: [
+      digest.trim(),
+      {
+        showEvents: true,
+        showObjectChanges: true,
+        showBalanceChanges: true
+      }
+    ] as [string, { showEvents: true; showObjectChanges: true; showBalanceChanges: true }]
   };
 }
 
@@ -678,6 +707,8 @@ export function parseSuiDeepBookOrders(
     marketLabel: string;
     transactionDigest?: string;
     executionHint?: "limit" | "market";
+    sideHint?: "buy" | "sell";
+    balanceOwnerAddress?: string;
   }
 ): SuiDeepBookOrder[] {
   const manager = filters.balanceManagerId.toLowerCase();
@@ -724,13 +755,32 @@ export function parseSuiDeepBookOrders(
           baseQuantity,
           quoteQuantity
         }),
-        status: event.status,
+        status: mergeSuiOrderStatus(previous?.status, event.status),
+        settlementEvidence: "deepbook event",
+        isSettled: mergeSuiOrderStatus(previous?.status, event.status) === "filled",
         price: event.price || previous?.price || "unknown",
         quantity: event.quantity || previous?.quantity || "unknown",
         digest: event.digest,
         transactionUrl: event.digest ? `https://suiexplorer.com/txblock/${event.digest}?network=testnet` : "",
         timestampMs: event.timestampMs
       });
+    }
+  }
+
+  const hasHintedTransactionEvidence = [...orders.values()].some(
+    (order) => order.digest === hintedDigest
+  );
+  if (hintedDigest && filters.executionHint && !hasHintedTransactionEvidence) {
+    const swapEvidence = getExactTransactionExecutionEvidence(responses, {
+      digest: hintedDigest,
+      poolId: pool,
+      marketLabel: filters.marketLabel,
+      execution: filters.executionHint,
+      sideHint: filters.sideHint,
+      balanceOwnerAddress: filters.balanceOwnerAddress
+    });
+    if (swapEvidence) {
+      orders.set(swapEvidence.orderId, swapEvidence);
     }
   }
 
@@ -743,6 +793,35 @@ export function describeSuiOrderAssetFlow(marketLabel: string, side: "buy" | "se
   const { base, quote } = getSuiMarketAssets(marketLabel);
 
   return side === "buy" ? `${quote} -> ${base}` : `${base} -> ${quote}`;
+}
+
+export function describeSuiSettlementEvidence(order: SuiDeepBookOrder | null | undefined) {
+  if (!order) {
+    return "Transaction confirmed, but settlement evidence is not indexed yet. Refresh Agent orders before treating it as filled.";
+  }
+
+  if (order.status === "filled") {
+    return `Swap filled and verified by ${order.settlementEvidence}: ${order.amountEvidence}.`;
+  }
+
+  if (order.status === "partially filled") {
+    return `Partial fill verified by DeepBook event: ${order.amountEvidence}. The order is not fully settled.`;
+  }
+
+  if (order.status === "open") {
+    return "Limit order is open on DeepBook. No swap settlement has occurred yet.";
+  }
+
+  if (order.status === "unfilled") {
+    const receivedAsset = order.side === "buy" ? order.baseAsset : order.quoteAsset;
+    return `Transaction confirmed, but no ${receivedAsset} was received. The market swap was not filled.`;
+  }
+
+  if (order.status === "submitted") {
+    return "Transaction confirmed, but DeepBook order evidence is still indexing. Refresh Agent orders before treating it as filled.";
+  }
+
+  return `DeepBook reports this order as ${order.status}. No completed swap settlement was verified.`;
 }
 
 function describeSuiOrderAmountEvidence(input: {
@@ -765,6 +844,171 @@ function describeSuiOrderAmountEvidence(input: {
   }
 
   return `Amount pending for ${input.side === "buy" ? `${input.quoteAsset} -> ${input.baseAsset}` : `${input.baseAsset} -> ${input.quoteAsset}`}`;
+}
+
+function getExactTransactionExecutionEvidence(
+  responses: unknown[],
+  input: {
+    digest: string;
+    poolId: string;
+    marketLabel: string;
+    execution: "limit" | "market";
+    sideHint?: "buy" | "sell";
+    balanceOwnerAddress?: string;
+  }
+): SuiDeepBookOrder | null {
+  const tx = responses
+    .map((response) => getRpcTransactionResult(response))
+    .find((result) => trimValue((result as { digest?: unknown })?.digest) === input.digest);
+  if (!tx) {
+    return null;
+  }
+
+  const events = getRpcEvents({ result: tx });
+  const budgetEvent = events
+    .map((event) => normalizeSuiEvent(event))
+    .find((event) => event?.type === "AgentBudgetUsed" && trimValue(getFirstString(event.parsedJson, ["pool_id", "poolId"]))?.toLowerCase() === input.poolId);
+  if (!budgetEvent) {
+    return null;
+  }
+
+  const { base, quote } = getSuiMarketAssets(input.marketLabel);
+  const side = input.sideHint ?? "buy";
+  const amount = getFirstString(budgetEvent.parsedJson, ["amount"]) || "";
+  const timestampMs =
+    budgetEvent.timestampMs ||
+    getFirstString(budgetEvent.parsedJson, ["timestamp_ms", "timestampMs", "timestamp"]) ||
+    getFirstString(tx as Record<string, unknown>, ["timestampMs"]) ||
+    "";
+  const receivedAsset = side === "buy" ? base : quote;
+  const receivedAmount = getPositiveBalanceChangeForToken(
+    tx,
+    receivedAsset,
+    input.balanceOwnerAddress
+  );
+  const filled = Boolean(receivedAmount);
+  const baseQuantity = side === "buy" ? receivedAmount : amount;
+  const quoteQuantity = side === "buy" ? amount : receivedAmount;
+  const assetFlow = describeSuiOrderAssetFlow(input.marketLabel, side);
+
+  return {
+    orderId: input.digest,
+    market: input.marketLabel,
+    poolId: input.poolId,
+    side,
+    execution: input.execution,
+    assetFlow,
+    baseAsset: base,
+    quoteAsset: quote,
+    baseQuantity,
+    quoteQuantity,
+    amountEvidence: filled
+      ? side === "buy"
+        ? `${amount || "Market"} ${quote} -> ${receivedAmount} ${base}`
+        : `${amount || "Market"} ${base} -> ${receivedAmount} ${quote}`
+      : input.execution === "limit" && amount
+        ? `${amount} ${side === "buy" ? quote : base} submitted; awaiting DeepBook order evidence`
+        : amount
+        ? side === "buy"
+          ? `${amount} ${quote} submitted; no ${base} filled`
+          : `${amount} ${base} submitted; no ${quote} filled`
+        : `No ${receivedAsset} filled`,
+    status: filled ? "filled" : input.execution === "market" ? "unfilled" : "submitted",
+    settlementEvidence: filled ? "balance change" : "transaction only",
+    isSettled: filled,
+    price: input.execution === "market" ? "market" : "pending index",
+    quantity: input.execution === "market" ? "market" : amount || "pending index",
+    digest: input.digest,
+    transactionUrl: `https://suiexplorer.com/txblock/${input.digest}?network=testnet`,
+    timestampMs
+  };
+}
+
+function mergeSuiOrderStatus(
+  previous: SuiDeepBookOrder["status"] | undefined,
+  next: SuiDeepBookOrder["status"]
+): SuiDeepBookOrder["status"] {
+  if (previous === "filled" || next === "filled") {
+    return "filled";
+  }
+
+  if (previous === "partially filled" || next === "partially filled") {
+    return "partially filled";
+  }
+
+  return next;
+}
+
+function getPositiveBalanceChangeForToken(
+  tx: unknown,
+  tokenLabel: string,
+  balanceOwnerAddress?: string
+) {
+  if (!tx || typeof tx !== "object") {
+    return "";
+  }
+
+  const changes = Array.isArray((tx as { balanceChanges?: unknown }).balanceChanges)
+    ? (tx as { balanceChanges: unknown[] }).balanceChanges
+    : [];
+  for (const change of changes) {
+    if (!change || typeof change !== "object") {
+      continue;
+    }
+
+    const coinType = trimValue((change as { coinType?: unknown }).coinType);
+    const amount = trimValue((change as { amount?: unknown }).amount);
+    const ownerAddress = getSuiBalanceChangeOwnerAddress(change);
+    if (
+      !coinTypeMatchesLabel(coinType, tokenLabel) ||
+      !amount ||
+      (balanceOwnerAddress && ownerAddress.toLowerCase() !== balanceOwnerAddress.toLowerCase())
+    ) {
+      continue;
+    }
+
+    try {
+      if (BigInt(amount) > 0n) {
+        return amount;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return "";
+}
+
+function getSuiBalanceChangeOwnerAddress(change: object) {
+  const owner = (change as { owner?: unknown }).owner;
+  if (typeof owner === "string") {
+    return owner;
+  }
+  if (!owner || typeof owner !== "object") {
+    return "";
+  }
+
+  return trimValue(
+    (owner as { AddressOwner?: unknown; addressOwner?: unknown }).AddressOwner ??
+      (owner as { addressOwner?: unknown }).addressOwner
+  );
+}
+
+function getRpcTransactionResult(response: unknown) {
+  if (!response || typeof response !== "object") {
+    return null;
+  }
+
+  const result = (response as { result?: unknown }).result;
+  return result && typeof result === "object" ? result : null;
+}
+
+function coinTypeMatchesLabel(coinType: string, tokenLabel: string) {
+  if (tokenLabel.toLowerCase() === "usdc" && /::DBUSDC::DBUSDC$/i.test(coinType)) {
+    return true;
+  }
+
+  return new RegExp(`::${escapeRegExp(tokenLabel)}(?:>|::|$)`, "i").test(coinType);
 }
 
 function getSuiMarketAssets(marketLabel: string) {
@@ -868,6 +1112,10 @@ function capitalize(value: string) {
   return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function commandValue(value: string, fallback: string) {
   return value || fallback;
 }
@@ -939,7 +1187,7 @@ function normalizeDeepBookEvent(event: unknown, selectedManager: string) {
   const type = typeof source.type === "string" ? source.type.split("::").pop() ?? "" : "";
   const statusByType: Record<string, SuiDeepBookOrder["status"]> = {
     OrderPlaced: "open",
-    OrderFilled: "fill observed",
+    OrderFilled: "partially filled",
     OrderFullyFilled: "filled",
     OrderCanceled: "cancelled",
     OrderExpired: "expired"

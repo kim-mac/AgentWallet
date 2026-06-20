@@ -35,6 +35,37 @@ describe("parseSuiAgentCommand", () => {
     });
   });
 
+  it("parses SUI/USDC buy commands using USDC decimals", () => {
+    expect(parseSuiAgentCommand("market buy 1 USDC of SUI")).toEqual({
+      kind: "place-order",
+      side: "buy",
+      amount: "1000000",
+      execution: "market"
+    });
+    expect(parseSuiAgentCommand("limit buy 2.5 USDC of SUI")).toEqual({
+      kind: "place-order",
+      side: "buy",
+      amount: "2500000",
+      execution: "limit"
+    });
+  });
+
+  it("parses SUI/USDC sell commands using SUI decimals", () => {
+    expect(parseSuiAgentCommand("market sell 0.1 SUI for USDC")).toEqual({
+      kind: "place-order",
+      side: "sell",
+      amount: "100000000",
+      execution: "market"
+    });
+    expect(parseSuiAgentCommand("limit sell 1 SUI for USDC")).toEqual({
+      kind: "place-order",
+      side: "sell",
+      amount: "1000000000",
+      execution: "limit"
+    });
+  });
+
+
   it.each([
     ["show budget", { kind: "show-budget" }],
     ["show orders", { kind: "show-orders" }],
@@ -45,7 +76,7 @@ describe("parseSuiAgentCommand", () => {
 
   it("rejects unsupported commands with guidance", () => {
     expect(() => parseSuiAgentCommand("do something clever")).toThrow(
-      "Try: market buy 0.1 SUI of DEEP, limit sell 0.1 SUI of DEEP, show budget, show orders, or test over budget."
+      "Try: market buy 0.1 SUI of DEEP, market sell 0.1 SUI for USDC, show budget, show orders, or test over budget."
     );
   });
 
@@ -56,10 +87,10 @@ describe("parseSuiAgentCommand", () => {
 
   it("rejects commands below the DeepBook minimum or outside its order increment", () => {
     expect(() => scaleSuiOrderQuantity("50000000", "100000000", "10000000")).toThrow(
-      "DeepBook DEEP/SUI orders must be at least 0.1 SUI and use 0.1 SUI increments."
+      "DeepBook orders must be at least the selected market minimum and use that market increment."
     );
     expect(() => scaleSuiOrderQuantity("150000000", "100000000", "10000000")).toThrow(
-      "DeepBook DEEP/SUI orders must be at least 0.1 SUI and use 0.1 SUI increments."
+      "DeepBook orders must be at least the selected market minimum and use that market increment."
     );
   });
 });

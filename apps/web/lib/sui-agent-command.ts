@@ -10,7 +10,7 @@ export type SuiAgentCommand =
   | { kind: "test-over-budget" };
 
 const commandGuidance =
-  "Try: market buy 0.1 SUI of DEEP, limit sell 0.1 SUI of DEEP, show budget, show orders, or test over budget.";
+  "Try: market buy 0.1 SUI of DEEP, market sell 0.1 SUI for USDC, show budget, show orders, or test over budget.";
 
 export function parseSuiAgentCommand(input: string): SuiAgentCommand {
   const normalized = input.trim().toLowerCase();
@@ -28,13 +28,13 @@ export function parseSuiAgentCommand(input: string): SuiAgentCommand {
   }
 
   const orderMatch = normalized.match(
-    /^(?:(market|limit)\s+)?(buy|sell)\s+(\d+(?:\.\d{1,9})?)\s+sui(?:\s+of\s+deep)?$/
+    /^(?:(market|limit)\s+)?(buy|sell)\s+(\d+(?:\.\d{1,9})?)\s+(sui|usdc)(?:\s+(?:of|for)\s+(deep|sui|usdc))?$/
   );
   if (orderMatch) {
     return {
       kind: "place-order",
       side: orderMatch[2] as "buy" | "sell",
-      amount: parseSuiAmountToMist(orderMatch[3]!),
+      amount: parseSuiCommandAmount(orderMatch[3]!, orderMatch[4]!),
       execution: orderMatch[1] === "market" ? "market" : "limit"
     };
   }
@@ -42,15 +42,28 @@ export function parseSuiAgentCommand(input: string): SuiAgentCommand {
   throw new Error(commandGuidance);
 }
 
-export function parseSuiAmountToMist(value: string) {
-  const [whole = "0", fraction = ""] = value.split(".");
-  const mist = BigInt(whole) * 1_000_000_000n + BigInt(fraction.padEnd(9, "0"));
+function parseSuiCommandAmount(value: string, token: string) {
+  return parseDecimalAmount(value, token === "usdc" ? 6 : 9);
+}
 
-  if (mist <= 0n) {
+export function parseSuiAmountToMist(value: string) {
+  return parseDecimalAmount(value, 9);
+}
+
+function parseDecimalAmount(value: string, decimals: number) {
+  const [whole = "0", fraction = ""] = value.split(".");
+  if (fraction.length > decimals) {
+    throw new Error(`Order amount supports up to ${decimals} decimal places.`);
+  }
+
+  const multiplier = 10n ** BigInt(decimals);
+  const atomicAmount = BigInt(whole) * multiplier + BigInt(fraction.padEnd(decimals, "0"));
+
+  if (atomicAmount <= 0n) {
     throw new Error("Order amount must be greater than zero.");
   }
 
-  return mist.toString();
+  return atomicAmount.toString();
 }
 
 export function scaleSuiOrderQuantity(
@@ -67,7 +80,7 @@ export function scaleSuiOrderQuantity(
   }
 
   if (requested < referenceSpend || requested % referenceSpend !== 0n) {
-    throw new Error("DeepBook DEEP/SUI orders must be at least 0.1 SUI and use 0.1 SUI increments.");
+    throw new Error("DeepBook orders must be at least the selected market minimum and use that market increment.");
   }
 
   const scaled = (referenceQuantity * requested) / referenceSpend;

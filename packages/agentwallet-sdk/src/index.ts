@@ -118,6 +118,7 @@ export type SuiMoveCallPlan = {
   typeArguments?: string[];
   arguments: string[];
   resultName?: string;
+  resultNames?: string[];
 };
 
 export type SuiSplitCoinsPlan = {
@@ -127,9 +128,15 @@ export type SuiSplitCoinsPlan = {
   resultName: string;
 };
 
+export type SuiTransferObjectsPlan = {
+  kind: "transferObjects";
+  objects: string[];
+  recipient: string;
+};
+
 export type SuiPtbPlan = {
   chain: "sui";
-  commands: Array<SuiMoveCallPlan | SuiSplitCoinsPlan>;
+  commands: Array<SuiMoveCallPlan | SuiSplitCoinsPlan | SuiTransferObjectsPlan>;
 };
 
 export type SuiCreatePolicyPlanInput = {
@@ -182,15 +189,19 @@ export type SuiDeepBookLimitOrderPlanInput = {
   balanceManagerId: string;
   baseAssetType: string;
   quoteAssetType: string;
+  deepFeeAssetType?: string;
   orderType: string;
   price: string;
   quantity: string;
   clockId: string;
   clientOrderId?: string;
   deepBookOrderType?: string;
+  execution?: "limit" | "market";
   selfMatchingOption?: string;
   payWithDeep?: boolean;
   expireTimestamp?: string;
+  settleToAddress?: string;
+  minimumOutput?: string;
 };
 
 export type SuiRevokePolicyPlanInput = {
@@ -209,6 +220,7 @@ export type SuiTransactionBuilderLike<TArgument = unknown, TResult = unknown> = 
     vector?: (type: "u8", value: number[]) => TArgument;
   };
   splitCoins?: (coin: any, amounts: any[]) => TResult;
+  transferObjects?: (objects: any[], recipient: any) => void;
   moveCall: (input: {
     target: string;
     // The official Sui SDK uses a concrete TransactionArgument union here.
@@ -521,24 +533,68 @@ export function buildSuiDeepBookLimitOrderPlan(input: SuiDeepBookLimitOrderPlanI
   requireValue(input.quantity, "quantity");
   requireValue(input.clockId, "clockId");
   const isBid = input.orderType.toLowerCase() === "bid";
+  const isMarket = input.execution === "market";
+  const action = isMarket ? "deepbook_market_order" : "deepbook_limit_order";
+  const commands: SuiPtbPlan["commands"] = [
+    {
+      kind: "moveCall",
+      target: `${input.packageId}::policy::take_budgeted_coin`,
+      typeArguments: [input.coinType],
+      arguments: [
+        input.policyId,
+        input.vaultId,
+        input.amount,
+        input.poolId,
+        action,
+        input.clockId
+      ],
+      resultName: "agentwalletCoin"
+    }
+  ];
+
+  if (isMarket) {
+    const swapTarget = isBid ? "swap_exact_quote_for_base" : "swap_exact_base_for_quote";
+    const swapResultNames = isBid
+      ? ["deepbookBaseOut", "deepbookQuoteOut", "deepbookFeeOut"]
+      : ["deepbookBaseOut", "deepbookQuoteOut", "deepbookFeeOut"];
+
+    commands.push(
+      {
+        kind: "moveCall",
+        target: "0x2::coin::zero",
+        typeArguments: [input.deepFeeAssetType ?? input.baseAssetType],
+        arguments: [],
+        resultName: "deepbookFeeCoin"
+      },
+      {
+        kind: "moveCall",
+        target: `${input.deepBookPackageId}::pool::${swapTarget}`,
+        typeArguments: [input.baseAssetType, input.quoteAssetType],
+        arguments: isBid
+          ? [input.poolId, "$agentwalletCoin", "$deepbookFeeCoin", input.minimumOutput ?? "1", input.clockId]
+          : [input.poolId, "$agentwalletCoin", "$deepbookFeeCoin", input.minimumOutput ?? "1", input.clockId],
+        resultNames: swapResultNames
+      }
+    );
+
+    if (input.settleToAddress) {
+      commands.push({
+        kind: "transferObjects",
+        objects: ["$deepbookBaseOut", "$deepbookQuoteOut", "$deepbookFeeOut"],
+        recipient: input.settleToAddress
+      });
+    }
+
+    return {
+      chain: "sui",
+      commands
+    };
+  }
 
   return {
     chain: "sui",
     commands: [
-      {
-        kind: "moveCall",
-        target: `${input.packageId}::policy::take_budgeted_coin`,
-        typeArguments: [input.coinType],
-        arguments: [
-          input.policyId,
-          input.vaultId,
-          input.amount,
-          input.poolId,
-          "deepbook_limit_order",
-          input.clockId
-        ],
-        resultName: "agentwalletCoin"
-      },
+      ...commands,
       {
         kind: "moveCall",
         target: `${input.deepBookPackageId}::balance_manager::deposit`,
@@ -609,6 +665,16 @@ export function toSuiTransaction<TTransaction extends SuiTransactionBuilderLike>
       continue;
     }
 
+    if (command.kind === "transferObjects") {
+      if (!transaction.transferObjects) {
+        throw new Error("Sui transaction builder does not support transferObjects.");
+      }
+
+      const objects = command.objects.map((object) => toSuiCoinArgument(transaction, object, results));
+      transaction.transferObjects(objects as never[], transaction.pure.address(command.recipient));
+      continue;
+    }
+
     const args = command.arguments.map((argument, index) =>
       toSuiArgument(transaction, command, argument, index, results)
     );
@@ -620,6 +686,18 @@ export function toSuiTransaction<TTransaction extends SuiTransactionBuilderLike>
 
     if (command.resultName) {
       results.set(command.resultName, result);
+    }
+
+    if (command.resultNames?.length) {
+      command.resultNames.forEach((resultName, index) => {
+        const nestedResult = Array.isArray(result)
+          ? result[index]
+          : (result as Record<number, unknown>)[index];
+        if (!nestedResult) {
+          throw new Error(`Sui PTB command did not return result ${index} for ${resultName}.`);
+        }
+        results.set(resultName, nestedResult);
+      });
     }
   }
 
@@ -813,19 +891,35 @@ function isU64Argument(command: SuiMoveCallPlan, index: number, argument: string
     return index === 3 || index === 6 || index === 7 || index === 10;
   }
 
+  if (command.target.endsWith("::pool::place_market_order")) {
+    return index === 3 || index === 5;
+  }
+
   return true;
 }
 
 function isU8Argument(command: SuiMoveCallPlan, index: number, argument: string) {
-  return command.target.endsWith("::pool::place_limit_order") && /^\d+$/.test(argument) && (index === 4 || index === 5);
+  if (!/^\d+$/.test(argument)) {
+    return false;
+  }
+
+  if (command.target.endsWith("::pool::place_limit_order")) {
+    return index === 4 || index === 5;
+  }
+
+  return command.target.endsWith("::pool::place_market_order") && index === 4;
 }
 
 function isBoolArgument(command: SuiMoveCallPlan, index: number, argument: string) {
-  return (
-    command.target.endsWith("::pool::place_limit_order") &&
-    (argument === "true" || argument === "false") &&
-    (index === 8 || index === 9)
-  );
+  if (argument !== "true" && argument !== "false") {
+    return false;
+  }
+
+  if (command.target.endsWith("::pool::place_limit_order")) {
+    return index === 8 || index === 9;
+  }
+
+  return command.target.endsWith("::pool::place_market_order") && (index === 6 || index === 7);
 }
 
 function isByteVectorArgument(command: SuiMoveCallPlan, index: number) {

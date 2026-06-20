@@ -372,6 +372,91 @@ describe("Sui AgentWallet PTB plans", () => {
     ]);
   });
 
+  it("builds a budgeted DeepBook market buy that swaps exact quote and settles output to the agent wallet", () => {
+    const plan = buildSuiDeepBookLimitOrderPlan({
+      packageId,
+      policyId,
+      vaultId,
+      coinType,
+      amount: "1000000",
+      poolId,
+      deepBookPackageId: "0xdee9",
+      balanceManagerId: "0xbalance",
+      baseAssetType: "0xdeep::DEEP",
+      quoteAssetType: coinType,
+      orderType: "bid",
+      execution: "market",
+      price: "1200000000",
+      quantity: "1000000",
+      clockId: "0x6",
+      settleToAddress: "0xagent"
+    });
+
+    expect(plan.commands).toEqual([
+      {
+        kind: "moveCall",
+        target: "0xagentwallet::policy::take_budgeted_coin",
+        typeArguments: [coinType],
+        arguments: [policyId, vaultId, "1000000", poolId, "deepbook_market_order", "0x6"],
+        resultName: "agentwalletCoin"
+      },
+      {
+        kind: "moveCall",
+        target: "0x2::coin::zero",
+        typeArguments: ["0xdeep::DEEP"],
+        arguments: [],
+        resultName: "deepbookFeeCoin"
+      },
+      {
+        kind: "moveCall",
+        target: "0xdee9::pool::swap_exact_quote_for_base",
+        typeArguments: ["0xdeep::DEEP", coinType],
+        arguments: [poolId, "$agentwalletCoin", "$deepbookFeeCoin", "1", "0x6"],
+        resultNames: ["deepbookBaseOut", "deepbookQuoteOut", "deepbookFeeOut"]
+      },
+      {
+        kind: "transferObjects",
+        objects: ["$deepbookBaseOut", "$deepbookQuoteOut", "$deepbookFeeOut"],
+        recipient: "0xagent"
+      }
+    ]);
+  });
+
+  it("builds a budgeted SUI/USDC market sell with a DEEP fee coin placeholder", () => {
+    const plan = buildSuiDeepBookLimitOrderPlan({
+      packageId,
+      policyId,
+      vaultId,
+      coinType,
+      amount: "100000000",
+      poolId,
+      deepBookPackageId: "0xdee9",
+      balanceManagerId: "0xbalance",
+      baseAssetType: coinType,
+      quoteAssetType: "0xusdc::DBUSDC::DBUSDC",
+      deepFeeAssetType: "0xdeep::DEEP",
+      orderType: "ask",
+      execution: "market",
+      price: "800000",
+      quantity: "100000000",
+      clockId: "0x6",
+      settleToAddress: "0xagent"
+    });
+
+    expect(plan.commands[1]).toMatchObject({
+      kind: "moveCall",
+      target: "0x2::coin::zero",
+      typeArguments: ["0xdeep::DEEP"]
+    });
+    expect(plan.commands[2]).toMatchObject({
+      kind: "moveCall",
+      target: "0xdee9::pool::swap_exact_base_for_quote",
+      typeArguments: [coinType, "0xusdc::DBUSDC::DBUSDC"],
+      arguments: [poolId, "$agentwalletCoin", "$deepbookFeeCoin", "1", "0x6"]
+    });
+  });
+
+
   it("builds the owner revocation call", () => {
     const plan = buildSuiRevokePolicyPlan({ packageId, policyId });
 
@@ -515,6 +600,43 @@ describe("Sui AgentWallet PTB plans", () => {
     expect(tx.calls[0]?.arguments[3]).toEqual({ kind: "pure.address", value: poolId });
     expect(tx.calls[3]?.arguments[0]).toEqual({ kind: "object", id: poolId });
     expect(tx.calls[3]?.arguments[1]).toEqual({ kind: "object", id: "0xbalance" });
+  });
+
+  it("applies a DeepBook exact-quote market swap settlement transfer to a Sui transaction builder", () => {
+    const tx = createFakeSuiTransaction();
+    const plan = buildSuiDeepBookLimitOrderPlan({
+      packageId,
+      policyId,
+      vaultId,
+      coinType,
+      amount: "1000000",
+      poolId,
+      deepBookPackageId: "0xdee9",
+      balanceManagerId: "0xbalance",
+      baseAssetType: "0xdeep::DEEP",
+      quoteAssetType: coinType,
+      orderType: "bid",
+      execution: "market",
+      price: "1200000000",
+      quantity: "1000000",
+      clockId: "0x6",
+      settleToAddress: "0xagent"
+    });
+
+    toSuiTransaction(tx, plan);
+
+    expect(tx.calls[1]?.target).toBe("0x2::coin::zero");
+    expect(tx.calls[2]?.target).toBe("0xdee9::pool::swap_exact_quote_for_base");
+    expect(tx.transfers).toEqual([
+      {
+        objects: [
+          { kind: "nestedResult", index: 2, resultIndex: 0 },
+          { kind: "nestedResult", index: 2, resultIndex: 1 },
+          { kind: "nestedResult", index: 2, resultIndex: 2 }
+        ],
+        recipient: { kind: "pure.address", value: "0xagent" }
+      }
+    ]);
   });
 
   it("applies a gas split deposit plan to a Sui transaction builder", () => {
@@ -721,10 +843,15 @@ function createFakeSuiTransaction() {
     coin: unknown;
     amounts: unknown[];
   }> = [];
+  const transfers: Array<{
+    objects: unknown[];
+    recipient: unknown;
+  }> = [];
 
   return {
     calls,
     splits,
+    transfers,
     gas: { kind: "gas" },
     object(id: string) {
       return { kind: "object", id };
@@ -746,7 +873,18 @@ function createFakeSuiTransaction() {
     },
     moveCall(input: { target: string; arguments: unknown[]; typeArguments?: string[] }) {
       calls.push(input);
+      if (input.target.endsWith("::pool::swap_exact_quote_for_base")) {
+        const index = calls.length - 1;
+        return [
+          { kind: "nestedResult", index, resultIndex: 0 },
+          { kind: "nestedResult", index, resultIndex: 1 },
+          { kind: "nestedResult", index, resultIndex: 2 }
+        ];
+      }
       return { kind: "result", index: calls.length - 1 };
+    },
+    transferObjects(objects: unknown[], recipient: unknown) {
+      transfers.push({ objects, recipient });
     }
   };
 }
