@@ -13,6 +13,7 @@ import {
   getSuiFundingReadiness,
   getSuiGasReadiness,
   getSuiBudgetMetrics,
+  getSuiPolicyExecutionBlocker,
   getSuiPolicyExpiryState,
   getSuiProofSummary,
   findSuiDeepBookMarketId,
@@ -235,6 +236,124 @@ describe("Sui dashboard helpers", () => {
     });
   });
 
+  it("reports owner revocation before an exhausted policy budget", () => {
+    expect(
+      getSuiPolicyExecutionBlocker(
+        normalizeSuiDashboardConfig({
+          policyId: "0xpolicy",
+          budgetMist: "500000000",
+          expiresAtMs: "200000"
+        }),
+        [
+          {
+            id: "spent:0",
+            digest: "spent",
+            sequence: "0",
+            type: "AgentBudgetUsed",
+            timestampMs: "2",
+            summary: "AgentBudgetUsed",
+            parsedJson: { policy_id: "0xpolicy", remaining_budget: "0" }
+          },
+          {
+            id: "revoked:0",
+            digest: "revoked",
+            sequence: "0",
+            type: "PolicyRevoked",
+            timestampMs: "3",
+            summary: "PolicyRevoked",
+            parsedJson: { policy_id: "0xpolicy" }
+          }
+        ],
+        "500000000",
+        100000
+      )
+    ).toEqual({
+      code: "POLICY_REVOKED",
+      remainingBudget: "0"
+    });
+  });
+
+  it("reports an exhausted policy budget before checking market liquidity", () => {
+    expect(
+      getSuiPolicyExecutionBlocker(
+        normalizeSuiDashboardConfig({
+          policyId: "0xpolicy",
+          budgetMist: "500000000",
+          expiresAtMs: "200000"
+        }),
+        [
+          {
+            id: "spent:0",
+            digest: "spent",
+            sequence: "0",
+            type: "AgentBudgetUsed",
+            timestampMs: "2",
+            summary: "AgentBudgetUsed",
+            parsedJson: { policy_id: "0xpolicy", remaining_budget: "0" }
+          }
+        ],
+        "500000000",
+        100000
+      )
+    ).toEqual({
+      code: "BUDGET_EXHAUSTED",
+      remainingBudget: "0"
+    });
+  });
+
+  it("ignores revocation events belonging to an older policy", () => {
+    expect(
+      getSuiPolicyExecutionBlocker(
+        normalizeSuiDashboardConfig({
+          policyId: "0xcurrent",
+          budgetMist: "500000000",
+          expiresAtMs: "200000"
+        }),
+        [
+          {
+            id: "revoked:0",
+            digest: "revoked",
+            sequence: "0",
+            type: "PolicyRevoked",
+            timestampMs: "3",
+            summary: "PolicyRevoked",
+            parsedJson: { policy_id: "0xold" }
+          }
+        ],
+        "100000000",
+        100000
+      )
+    ).toBeNull();
+  });
+
+  it("reports when an action exceeds the policy's remaining budget", () => {
+    expect(
+      getSuiPolicyExecutionBlocker(
+        normalizeSuiDashboardConfig({
+          policyId: "0xpolicy",
+          budgetMist: "500000000",
+          expiresAtMs: "200000"
+        }),
+        [
+          {
+            id: "spent:0",
+            digest: "spent",
+            sequence: "0",
+            type: "AgentBudgetUsed",
+            timestampMs: "2",
+            summary: "AgentBudgetUsed",
+            parsedJson: { policy_id: "0xpolicy", remaining_budget: "200000000" }
+          }
+        ],
+        "300000000",
+        100000
+      )
+    ).toEqual({
+      code: "AMOUNT_EXCEEDS_REMAINING_BUDGET",
+      remainingBudget: "200000000"
+    });
+  });
+
   it("formats policy budget values using the mandate token decimals", () => {
     expect(formatSuiTokenAmount("100000000", "SUI")).toBe("0.1 SUI");
     expect(formatSuiTokenAmount("450000000", "USDC")).toBe("450 USDC");
@@ -256,16 +375,19 @@ describe("Sui dashboard helpers", () => {
     expect(suiDeepBookMarkets).toContainEqual(
       expect.objectContaining({
         id: "deep-sui-testnet",
+        deepbookPoolKey: "DEEP_SUI",
         label: "DEEP / SUI",
         network: "testnet",
         deepbookPackageId: "0xbc331f09e5c737d45f074ad2d17c3038421b3b9018699e370d88d94938c53d28",
         poolId: "0x48c95963e9eac37a316b7ae04a0deb761bcdcc2b67912374d6036e7f0e9bae9f",
-        quoteAssetType: "0x2::sui::SUI"
+        quoteAssetType: "0x2::sui::SUI",
+        defaultSpendAmount: "500000000"
       })
     );
     expect(suiDeepBookMarkets).toContainEqual(
       expect.objectContaining({
         id: "sui-usdc-testnet",
+        deepbookPoolKey: "SUI_DBUSDC",
         label: "SUI / USDC",
         network: "testnet",
         poolId: "0x1c19362ca52b8ffd7a33cee805a67d40f31e6ba303753fd3a4cfdfacea7163a5",
@@ -273,7 +395,8 @@ describe("Sui dashboard helpers", () => {
         tokenTypeLabel: "SUI",
         baseAssetType: "0x2::sui::SUI",
         quoteAssetType: "0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC",
-        defaultOrderSide: "ask"
+        defaultOrderSide: "ask",
+        defaultSpendAmount: "1000000000"
       })
     );
   });
@@ -302,7 +425,7 @@ describe("Sui dashboard helpers", () => {
       tokenTypeLabel: "SUI",
       orderQuantity: "10000000",
       limitPrice: "10000000000",
-      spendAmount: "100000000"
+      spendAmount: "500000000"
     });
     expect(findSuiDeepBookMarketId(config)).toBe("deep-sui-testnet");
     expect(findSuiDeepBookMarketId({ ...config, allowedPoolId: "0xcustom" })).toBe("custom");
@@ -331,8 +454,8 @@ describe("Sui dashboard helpers", () => {
       tokenTypeLabel: "SUI",
       deepbookBaseType: "0x2::sui::SUI",
       deepbookQuoteType: "0xf7152c05930480cd740d7311b5b8b45c6f488e3a53a11c3f74a6fac36a52e0d7::DBUSDC::DBUSDC",
-      spendAmount: "100000000",
-      orderQuantity: "100000000",
+      spendAmount: "1000000000",
+      orderQuantity: "1000000000",
       orderSide: "ask"
     });
     expect(findSuiDeepBookMarketId(config)).toBe("sui-usdc-testnet");
@@ -457,6 +580,80 @@ describe("Sui dashboard helpers", () => {
         }
       }],
       { balanceManagerId: "0xagent", poolId: "0xpool", marketLabel: "DEEP / SUI" }
+    );
+
+    expect(orders.map((order) => order.orderId)).toEqual(["agent-order"]);
+  });
+
+  it("does not show counterparty maker orders from the agent's exact market transaction", () => {
+    const orders = parseSuiDeepBookOrders(
+      [{
+        result: {
+          digest: "market-digest",
+          events: [
+            {
+              id: { txDigest: "market-digest", eventSeq: "0" },
+              type: "0xdeepbook::order_info::OrderFilled",
+              parsedJson: {
+                maker_order_id: "maker-one",
+                taker_order_id: "agent-order",
+                maker_balance_manager_id: "0xmaker",
+                taker_balance_manager_id: "0xagent",
+                pool_id: "0xpool",
+                taker_is_bid: true,
+                price: "10",
+                base_quantity: "5",
+                quote_quantity: "50",
+                timestamp: "1"
+              }
+            },
+            {
+              id: { txDigest: "market-digest", eventSeq: "1" },
+              type: "0xdeepbook::order_info::OrderFullyFilled",
+              parsedJson: {
+                balance_manager_id: "0xmaker",
+                pool_id: "0xpool",
+                order_id: "maker-one",
+                original_quantity: "3",
+                is_bid: false,
+                timestamp: "1"
+              }
+            },
+            {
+              id: { txDigest: "market-digest", eventSeq: "2" },
+              type: "0xdeepbook::order_info::OrderFullyFilled",
+              parsedJson: {
+                balance_manager_id: "0xmaker",
+                pool_id: "0xpool",
+                order_id: "maker-two",
+                original_quantity: "2",
+                is_bid: false,
+                timestamp: "1"
+              }
+            },
+            {
+              id: { txDigest: "market-digest", eventSeq: "3" },
+              type: "0xdeepbook::order_info::OrderFullyFilled",
+              parsedJson: {
+                balance_manager_id: "0xagent",
+                pool_id: "0xpool",
+                order_id: "agent-order",
+                original_quantity: "5",
+                is_bid: true,
+                timestamp: "1"
+              }
+            }
+          ]
+        }
+      }],
+      {
+        balanceManagerId: "0xagent",
+        poolId: "0xpool",
+        marketLabel: "DEEP / SUI",
+        transactionDigest: "market-digest",
+        executionHint: "market",
+        sideHint: "buy"
+      }
     );
 
     expect(orders.map((order) => order.orderId)).toEqual(["agent-order"]);

@@ -25,6 +25,7 @@ import { simulatePolicyAttacks } from "@agentspend/policy-simulator";
 import type { SpendEvent } from "@agentspend/shared";
 import { parseAgentCommand } from "../lib/agent-command";
 import { parseSuiAgentCommand, scaleSuiOrderQuantity } from "../lib/sui-agent-command";
+import type { SuiDeepBookQuoteDecision } from "../lib/sui-deepbook-quote";
 import {
   applySuiDeepBookMarket,
   buildSuiDashboardCommands,
@@ -36,6 +37,7 @@ import {
   getSuiGasReadiness,
   getSuiBudgetMetrics,
   getSuiLaunchStage,
+  getSuiPolicyExecutionBlocker,
   getSuiPolicyExpiryState,
   getSuiProofSummary,
   mergeSuiActivityIntoConfig,
@@ -3047,7 +3049,7 @@ function SuiView() {
       id: "sui-agent-intro",
       role: "agent",
       content:
-        "Give me a rule-based action: market buy 0.1 SUI of DEEP, market sell 0.1 SUI for USDC, show budget, show orders, or test over budget.",
+        "Give me a rule-based action: market buy 0.5 SUI of DEEP, market sell 1 SUI for USDC, show budget, show orders, or test over budget.",
       status: "info"
     }
   ]);
@@ -3363,7 +3365,7 @@ function SuiView() {
       const command = parseSuiAgentCommand(input);
 
       if (command.kind === "show-budget") {
-        const metrics = getSuiBudgetMetrics(config.budgetMist, activityEvents);
+        const metrics = getSuiBudgetMetrics(config.budgetMist, activityEvents, config.policyId);
         appendSuiAgentMessage({
           role: "agent",
           content: `Budget used: ${formatSuiTokenAmount(metrics.usedBudget, config.tokenTypeLabel)}. Remaining: ${formatSuiTokenAmount(metrics.remainingBudget, config.tokenTypeLabel)}.`,
@@ -3382,36 +3384,76 @@ function SuiView() {
         return;
       }
 
-      if (getSuiPolicyExpiryState(config.expiresAtMs).expired) {
-        const message = "Rejected: this policy has expired. Create a new mandate before asking the agent to trade.";
-        appendSuiAgentMessage({ role: "agent", content: message, status: "rejected" });
-        setSuiActionStatus(message);
-        return;
+      if (command.kind !== "test-over-budget") {
+        const blocker = getSuiPolicyExecutionBlocker(
+          config,
+          activityEvents,
+          command.amount
+        );
+        if (blocker) {
+          const message = blocker.code === "POLICY_REVOKED"
+            ? "Rejected: the owner revoked this policy. Create a new mandate before asking the agent to trade."
+            : blocker.code === "POLICY_EXPIRED"
+              ? "Rejected: this policy has expired. Create a new mandate before asking the agent to trade."
+              : blocker.code === "BUDGET_EXHAUSTED"
+                ? "Rejected: this policy's budget is exhausted. Create a new mandate before asking the agent to trade again."
+                : `Rejected: this action exceeds the policy's remaining budget. Remaining: ${formatSuiTokenAmount(
+                    blocker.remainingBudget,
+                    config.tokenTypeLabel
+                  )}.`;
+          appendSuiAgentMessage({ role: "agent", content: message, status: "rejected" });
+          setSuiActionStatus(message);
+          return;
+        }
       }
 
       if (!unlockedSuiWallets) {
         throw new Error("Unlock the local Sui wallets before asking the agent to execute an action.");
       }
 
+      const selectedMarket = suiDeepBookMarkets.find(
+        (candidate) => candidate.poolId === config.allowedPoolId
+      );
       const actionConfig =
         command.kind === "test-over-budget"
           ? buildSuiOverBudgetConfig(config)
           : (() => {
-              const market = suiDeepBookMarkets.find(
-                (candidate) => candidate.poolId === config.allowedPoolId
-              );
               return normalizeSuiDashboardConfig({
                 ...config,
                 spendAmount: command.amount,
                 orderQuantity: scaleSuiOrderQuantity(
                   command.amount,
-                  market?.defaultSpendAmount ?? config.spendAmount,
-                  market?.defaultOrderQuantity ?? config.orderQuantity
+                  selectedMarket?.defaultSpendAmount ?? config.spendAmount,
+                  selectedMarket?.defaultOrderQuantity ?? config.orderQuantity
                 ),
                 orderSide: command.side === "buy" ? "bid" : "ask",
                 orderExecution: command.execution
               });
             })();
+      if (command.kind !== "test-over-budget" && command.execution === "market") {
+        if (!selectedMarket) {
+          throw new Error("Choose a verified DeepBook market before asking the agent to swap.");
+        }
+
+        setSuiActionStatus("Checking current DeepBook liquidity before using policy budget...");
+        const quoteResponse = await fetch("/api/sui/deepbook-quote", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agentAddress: actionConfig.agentAddress,
+            poolKey: selectedMarket.deepbookPoolKey,
+            side: command.side,
+            amount: actionConfig.spendAmount
+          })
+        });
+        const quote = await readJsonResponse<SuiDeepBookQuoteDecision & { message: string }>(quoteResponse);
+        if (!quote.executable) {
+          appendSuiAgentMessage({ role: "agent", content: quote.message, status: "rejected" });
+          setSuiActionStatus(quote.message);
+          return;
+        }
+        setSuiActionStatus(`${quote.message} Submitting through the Move policy...`);
+      }
       setSuiActionStatus(
         command.kind === "test-over-budget"
           ? "Agent is deliberately testing the on-chain budget ceiling..."
@@ -3449,7 +3491,7 @@ function SuiView() {
       if (!result.ok) {
         const rejectionMessage = result.error.includes("remaining budget")
           ? `${result.error} Remaining budget: ${formatSuiTokenAmount(
-              getSuiBudgetMetrics(config.budgetMist, activityEvents).remainingBudget,
+              getSuiBudgetMetrics(config.budgetMist, activityEvents, config.policyId).remainingBudget,
               config.tokenTypeLabel
             )}`
           : result.error;
@@ -4214,7 +4256,7 @@ function SuiGuidedDashboard({
     budgetMist: config.budgetMist,
     coinType: config.coinType
   });
-  const budgetMetrics = getSuiBudgetMetrics(config.budgetMist, activityEvents);
+  const budgetMetrics = getSuiBudgetMetrics(config.budgetMist, activityEvents, config.policyId);
   const expiryState = getSuiPolicyExpiryState(config.expiresAtMs, nowMs);
   const proofSummary = getSuiProofSummary(config, activityEvents, deepBookOrders, nowMs);
 
@@ -5813,8 +5855,8 @@ function getSuiCoinTypeLabel(type: string) {
 
 function getSuiAgentExamples(marketLabel: string) {
   return marketLabel.includes("USDC")
-    ? ["market sell 0.1 SUI for USDC", "limit sell 0.1 SUI for USDC", "show budget", "test over budget"]
-    : ["market buy 0.1 SUI of DEEP", "limit buy 0.1 SUI of DEEP", "show budget", "test over budget"];
+    ? ["market sell 1 SUI for USDC", "limit sell 1 SUI for USDC", "show budget", "test over budget"]
+    : ["market buy 0.5 SUI of DEEP", "limit buy 0.5 SUI of DEEP", "show budget", "test over budget"];
 }
 
 function suiDemoStepLabel(action: SuiDashboardActionId) {

@@ -2,6 +2,18 @@
 (Solana Hackathon Winner • Fast-Tracked for Solana Accelerator)
 Brex/Ramp-style spend controls for AI agents on Solana.
 
+## Sui Overflow 2026
+
+AgentWallet also includes a Sui-native autonomous agent wallet built with
+shared Move policy and vault objects plus real DeepBook V3 execution. Start with
+the dedicated [AgentWallet on Sui guide](SUI_README.md) for the live dashboard
+flow, deployed testnet package, architecture, Explorer evidence, and judge
+demo instructions.
+
+- Live app: [agentwallet-web.vercel.app/app](https://agentwallet-web.vercel.app/app)
+- Public repo: [github.com/kim-mac/AgentWallet](https://github.com/kim-mac/AgentWallet)
+- Sui testnet package: `0x768743700b22d533d228719672e17009a48a4dac473ae7f1d1d2733f6c1defa9`
+
 `x402` lets agents pay. AgentWallet lets owners control how autonomous agents
 spend: budgets, approvals, vendor allowlists, recipient allowlists, and audit
 logs outside agent code.

@@ -35,6 +35,7 @@ export type SuiDashboardConfig = {
 
 export type SuiDeepBookMarket = {
   id: string;
+  deepbookPoolKey: "DEEP_SUI" | "SUI_DBUSDC";
   label: string;
   network: "testnet";
   description: string;
@@ -108,6 +109,15 @@ export type SuiProofSummary = {
   }>;
 };
 
+export type SuiPolicyExecutionBlocker = {
+  code:
+    | "POLICY_REVOKED"
+    | "POLICY_EXPIRED"
+    | "BUDGET_EXHAUSTED"
+    | "AMOUNT_EXCEEDS_REMAINING_BUDGET";
+  remainingBudget: string;
+};
+
 export type SuiEventRpcRequest = {
   jsonrpc: "2.0";
   id: 1;
@@ -138,6 +148,7 @@ export const suiGasReserveMist = 50_000_000n;
 export const suiDeepBookMarkets: SuiDeepBookMarket[] = [
   {
     id: "deep-sui-testnet",
+    deepbookPoolKey: "DEEP_SUI",
     label: "DEEP / SUI",
     network: "testnet",
     description: "Verified DeepBook V3 testnet market used by the autonomous strategy demo.",
@@ -147,12 +158,13 @@ export const suiDeepBookMarkets: SuiDeepBookMarket[] = [
     tokenTypeLabel: "SUI",
     baseAssetType: deepbookDeepType,
     quoteAssetType: suiType,
-    defaultSpendAmount: "100000000",
+    defaultSpendAmount: "500000000",
     defaultOrderQuantity: "10000000",
     defaultLimitPrice: "10000000000"
   },
   {
     id: "sui-usdc-testnet",
+    deepbookPoolKey: "SUI_DBUSDC",
     label: "SUI / USDC",
     network: "testnet",
     description: "Verified DeepBook V3 testnet SUI/DBUSDC market for SUI-funded agent swaps into USDC.",
@@ -162,8 +174,8 @@ export const suiDeepBookMarkets: SuiDeepBookMarket[] = [
     tokenTypeLabel: "SUI",
     baseAssetType: suiType,
     quoteAssetType: deepbookTestnetUsdcType,
-    defaultSpendAmount: "100000000",
-    defaultOrderQuantity: "100000000",
+    defaultSpendAmount: "1000000000",
+    defaultOrderQuantity: "1000000000",
     defaultLimitPrice: "700000",
     defaultOrderSide: "ask"
   }
@@ -291,10 +303,17 @@ export function getSuiGasReadiness(input: {
   };
 }
 
-export function getSuiBudgetMetrics(maxBudgetValue: string, events: SuiActivityEvent[]) {
+export function getSuiBudgetMetrics(
+  maxBudgetValue: string,
+  events: SuiActivityEvent[],
+  policyId = ""
+) {
   const maxBudget = toSafeBigInt(maxBudgetValue);
   const latestBudgetEvent = events
-    .filter((event) => event.type === "AgentBudgetUsed")
+    .filter(
+      (event) =>
+        event.type === "AgentBudgetUsed" && suiEventMatchesPolicy(event, policyId)
+    )
     .sort((left, right) => Number(right.timestampMs ?? "0") - Number(left.timestampMs ?? "0"))
     .find((event) => getFirstString(event.parsedJson, ["remaining_budget", "remainingBudget"]));
   const reportedRemaining = latestBudgetEvent
@@ -308,6 +327,38 @@ export function getSuiBudgetMetrics(maxBudgetValue: string, events: SuiActivityE
     usedBudget: usedBudget.toString(),
     remainingBudget: remainingBudget.toString()
   };
+}
+
+export function getSuiPolicyExecutionBlocker(
+  configValue: Partial<SuiDashboardConfig> | null | undefined,
+  events: SuiActivityEvent[],
+  requestedAmount: string,
+  nowMs = Date.now()
+): SuiPolicyExecutionBlocker | null {
+  const config = normalizeSuiDashboardConfig(configValue);
+  const budget = getSuiBudgetMetrics(config.budgetMist, events, config.policyId);
+
+  if (findLatestSuiPolicyEvent(events, "PolicyRevoked", config.policyId)) {
+    return { code: "POLICY_REVOKED", remainingBudget: budget.remainingBudget };
+  }
+
+  if (getSuiPolicyExpiryState(config.expiresAtMs, nowMs).expired) {
+    return { code: "POLICY_EXPIRED", remainingBudget: budget.remainingBudget };
+  }
+
+  const remainingBudget = toSafeBigInt(budget.remainingBudget);
+  if (remainingBudget === 0n) {
+    return { code: "BUDGET_EXHAUSTED", remainingBudget: budget.remainingBudget };
+  }
+
+  if (toSafeBigInt(requestedAmount) > remainingBudget) {
+    return {
+      code: "AMOUNT_EXCEEDS_REMAINING_BUDGET",
+      remainingBudget: budget.remainingBudget
+    };
+  }
+
+  return null;
 }
 
 export function formatSuiTokenAmount(value: string, tokenLabel: string) {
@@ -346,7 +397,7 @@ export function getSuiProofSummary(
   nowMs = Date.now()
 ): SuiProofSummary {
   const config = normalizeSuiDashboardConfig(configValue);
-  const budgetMetrics = getSuiBudgetMetrics(config.budgetMist, events);
+  const budgetMetrics = getSuiBudgetMetrics(config.budgetMist, events, config.policyId);
   const maxBudget = toSafeBigInt(budgetMetrics.maxBudget);
   const usedBudget = toSafeBigInt(budgetMetrics.usedBudget);
   const percentUsed = maxBudget > 0n ? Number((usedBudget * 100n) / maxBudget) : 0;
@@ -354,8 +405,8 @@ export function getSuiProofSummary(
   const policyCreated = findLatestSuiEvent(events, "PolicyCreated");
   const vaultCreated = findLatestSuiEvent(events, "AgentVaultCreated");
   const vaultFunded = findLatestSuiEvent(events, "AgentVaultFunded");
-  const budgetUsed = findLatestSuiEvent(events, "AgentBudgetUsed");
-  const revoked = findLatestSuiEvent(events, "PolicyRevoked");
+  const budgetUsed = findLatestSuiPolicyEvent(events, "AgentBudgetUsed", config.policyId);
+  const revoked = findLatestSuiPolicyEvent(events, "PolicyRevoked", config.policyId);
   const latestOrder = orders[0] ?? null;
   const policyReady = Boolean(config.policyId || policyCreated);
   const vaultReady = Boolean(config.vaultId || vaultCreated);
@@ -720,7 +771,13 @@ export function parseSuiDeepBookOrders(
     .filter((event): event is NonNullable<ReturnType<typeof normalizeDeepBookEvent>> => Boolean(event))
     .filter(
       (event) =>
-        (!manager || event.managerIds.includes(manager) || Boolean(hintedDigest && event.digest === hintedDigest)) &&
+        (!manager ||
+          event.managerIds.includes(manager) ||
+          Boolean(
+            hintedDigest &&
+              event.digest === hintedDigest &&
+              event.managerIds.length === 0
+          )) &&
         (!pool || event.poolId === pool)
     )
     .sort((left, right) => Number(left.timestampMs ?? "0") - Number(right.timestampMs ?? "0"));
@@ -1102,6 +1159,23 @@ function findLatestSuiEvent(events: SuiActivityEvent[], type: string) {
   return [...events]
     .filter((event) => event.type === type)
     .sort((left, right) => Number(right.timestampMs ?? "0") - Number(left.timestampMs ?? "0"))[0] ?? null;
+}
+
+function findLatestSuiPolicyEvent(events: SuiActivityEvent[], type: string, policyId: string) {
+  return findLatestSuiEvent(
+    events.filter((event) => suiEventMatchesPolicy(event, policyId)),
+    type
+  );
+}
+
+function suiEventMatchesPolicy(event: SuiActivityEvent, policyId: string) {
+  const normalizedPolicyId = policyId.trim().toLowerCase();
+  if (!normalizedPolicyId) {
+    return true;
+  }
+
+  const eventPolicyId = getFirstString(event.parsedJson, ["policy_id", "policy", "policyId"]);
+  return !eventPolicyId || eventPolicyId.toLowerCase() === normalizedPolicyId;
 }
 
 function capitalize(value: string) {
