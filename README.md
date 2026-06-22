@@ -1,6 +1,6 @@
 # AgentWallet
 (Solana Hackathon Winner • Fast-Tracked for Solana Accelerator)
-Brex/Ramp-style spend controls for AI agents on Solana.
+Brex/Ramp-style spend controls for AI agents on Solana & Sui.
 
 ## Sui Overflow 2026
 
