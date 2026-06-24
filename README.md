@@ -1,6 +1,6 @@
 # AgentWallet
 (Solana Hackathon Winner • Fast-Tracked for Solana Accelerator)
-Brex/Ramp-style spend controls for AI agents on Solana.
+Brex/Ramp-style spend controls for AI agents on Solana & Sui.
 
 ## Sui Overflow 2026
 
@@ -291,7 +291,7 @@ npm run typecheck
 npm run build
 ```
 
-## Anchor toolchain note
+## Anchor toolchain note.
 
 The local Windows/WSL environment is ARM64. The Solana Foundation Anchor Docker
 image works, but it runs as `linux/amd64` under emulation on this machine. The
