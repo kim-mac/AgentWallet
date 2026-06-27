@@ -4,7 +4,7 @@ Brex/Ramp-style spend controls for AI agents on Solana & Sui.
 
 ## Sui Overflow 2026
 
-AgentWallet also includes a Sui-native autonomous agent wallet built with
+AgentWallet includes a Sui-native autonomous agent wallet built with
 shared Move policy and vault objects plus real DeepBook V3 execution. Start with
 the dedicated [AgentWallet on Sui guide](SUI_README.md) for the live dashboard
 flow, deployed testnet package, architecture, Explorer evidence, and judge
