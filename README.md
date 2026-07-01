@@ -68,7 +68,7 @@ For a fully self-serve judge demo:
 Secret keys can be pasted as a JSON array from a Solana keypair file or as a
 comma-separated 64-byte list. Keep these devnet-only.
 
-## Judge-ready devnet flow
+## Judge-ready devnet flow.
 
 1. Install Phantom and switch it to Solana devnet.
 2. Fund the wallet with devnet SOL from Phantom or a devnet faucet.
@@ -99,7 +99,7 @@ npm run dev
 This path creates real devnet transactions and the SPL token transfer is routed
 through the deployed AgentWallet program.
 
-## Run the Anchor policy account flow
+## Run the Anchor policy account flow.
 
 The dashboard can now build real Anchor-compatible devnet transactions for the
 AgentWallet program:
